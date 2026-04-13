@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx --yes create-next-app@latest . --ts --tailwind --app --eslint --import-alias \"@/*\" --use-pnpm --no-src-dir --turbopack --yes)",
+      "Bash(npx --yes create-next-app@latest _tmp_init --ts --tailwind --app --eslint --import-alias \"@/*\" --use-pnpm --no-src-dir --turbopack --yes)",
+      "Bash(npx --yes create-next-app@latest app-init --ts --tailwind --app --eslint --import-alias \"@/*\" --use-pnpm --no-src-dir --turbopack --yes)",
+      "Bash(shopt -s dotglob)",
+      "Bash(mv app-init/* .)",
+      "Bash(shopt -u dotglob)",
+      "Bash(rmdir app-init:*)",
+      "Bash(npx --yes create-next-app@15 app-init --ts --tailwind --app --eslint --import-alias \"@/*\" --use-pnpm --no-src-dir --no-turbopack --yes)",
+      "Bash(pnpm add:*)",
+      "Bash(rm -rf node_modules pnpm-lock.yaml)",
+      "Bash(pnpm install:*)",
+      "Bash(npx --yes shadcn@latest init --yes --base-color neutral)",
+      "Bash(npx --yes shadcn@latest init --help)",
+      "Bash(npx --yes shadcn@latest init -d -f)"
+    ]
+  }
+}
