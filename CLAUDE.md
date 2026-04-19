@@ -318,7 +318,7 @@ create table public.documents (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   title text not null,
-  content_type text not null check (content_type in ('pdf','txt','url')),
+  content_type text not null check (content_type in ('pdf','txt','url','docx')),
   source_url text,
   status text not null default 'processing' check (status in ('processing','ready','failed')),
   error_message text,
