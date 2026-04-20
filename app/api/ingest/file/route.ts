@@ -9,6 +9,8 @@ import {
 } from "@/lib/validators/ingest";
 
 export const runtime = "nodejs";
+// Vercel Hobby 默认 10s 超时,PDF/docx 解析 + 批量 embedding 接近边界,显式拉到 60s
+export const maxDuration = 60;
 
 type SupportedExt = "pdf" | "txt" | "docx";
 

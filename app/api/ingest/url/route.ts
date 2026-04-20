@@ -6,6 +6,8 @@ import { processAndStoreDocument } from "@/lib/rag/ingest";
 import { ingestUrlSchema, MIN_TEXT_LENGTH } from "@/lib/validators/ingest";
 
 export const runtime = "nodejs";
+// Vercel Hobby 默认 10s 超时,抓网页 + 切块 + 批量 embedding 接近边界,显式拉到 60s
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   // ---------- 第一关卡:廉价校验 ----------

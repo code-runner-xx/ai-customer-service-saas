@@ -7,6 +7,8 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { retrieveContext } from '@/lib/rag/retrieve';
 
 export const runtime = 'nodejs';
+// Vercel Hobby 默认 10s,流式对话偶尔长一点也更稳
+export const maxDuration = 60;
 
 // ---------- C 端速率限制 ----------
 // TODO: 生产环境替换为 Upstash / Redis，此内存 Map 在多实例下不共享
