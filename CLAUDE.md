@@ -230,6 +230,26 @@ shadcn base-nova 预设的底层是 `@base-ui/react`,API 与老的 Radix 版 sha
 
 ---
 
+## 0.11 Step 16 完成记录
+
+- **Step 16 完成时间**:2026-04-20
+- **生产域名**:https://ai-customer-service-saas.vercel.app
+- **已完成**:Vercel 首次上线,仓库 `code-runner-xx/ai-customer-service-saas` `main` 分支接入自动构建 + 部署,公网闭环跑通。部署流程分两阶段:阶段 0(代码端准备)commit `1f3d007` 给三个路由加 `export const maxDuration = 60;` + `pnpm build` 冒烟零报错;阶段 1(Vercel 控制台)手动 Import → 填 6 键环境变量(`NEXT_PUBLIC_APP_URL` 先占位)→ 首次 Deploy → 回填真实域名 → Redeploy 关掉 Build Cache 让 `NEXT_PUBLIC_*` 重新烘焙
+- **关键部署决策**(首次上线刻意走"最小可行路径",**非"生产就绪"模板**,硬化项全部单拆后做):
+  1. **Supabase**:复用开发项目,未另开生产项目(开发 / 生产数据暂时混在同一库,观察期后视情况拆)
+  2. **SiliconFlow API Key**:复用本地开发 Key,未分离生产 Key(事故时吊销需本地也同步换)
+  3. **SMTP / Confirm email**:**未配**,保持开发阶段"关闭确认邮件"状态(注册不收验证邮件,直接登录)——DEPLOYMENT.md 的上线 checklist 原本要求重开,本次刻意跳过,作为独立任务以后做
+  4. **自定义域名**:未配,用 Vercel 自动分配的 `*.vercel.app`
+- **验收结果**:14 项验收清单中 12 项通过(第三组 8-9、第四组 10-13 全通),⑭ 速率限制用户同意跳过(内存 Map 在 Serverless 多实例下本就不共享,单独列入待办,不在 Step 16 范围内修)
+- **发现的待办 bug / 优化项**(**不在 Step 16 范围内修,记录供后续 Step 认领**):
+  1. **embedding 批量未按字节切片导致 SiliconFlow 413**:`lib/rag/embed.ts`(及 `embed-core.ts`)目前只按"每批 100 条"分批,未考虑单批累计字节数。极端长文本(如超长 URL 抓取正文)一次性打包超过 SiliconFlow embedding API 请求体上限,返回 HTTP 413。修复思路:在"按条数分批"之外再加一层"按累计 bytes 切片"阈值(如单批 ≤ 2MB),或按 token 预估切片;此外可把 `chunkText` 输出的长 chunk 做上限截断(当前 chunkSize=800 字符,但极端输入仍可能超)
+  2. **拒答时 ChatWindow 仍显示 citations chip**:当 retrieve 无匹配、模型按 system prompt 输出"抱歉,我在知识库中没有找到相关信息…"时,citations 数组理应为空但 UI 仍渲染出 chip(可能是上一条残留或空数组默认渲染)。属于 UI 瑕疵,非功能性。修复思路:在 `components/chat/ChatWindow.tsx` 的 citations 渲染条件里,要求 citations 数组长度 > 0 才渲染,或叠加消息文本拒答前缀白名单检查
+  3. **公开聊天页刷新丢历史**:`useChat` 仅内存保存消息,刷新后 `chat_messages` 持久化记录不被前端拉回。**Step 17 计划修复**(方向 A 匿名 + visitorId 恢复)
+  4. **速率限制内存 Map 在 Vercel Serverless 下失效**:`app/api/chat/route.ts:14` 的 `rateLimitMap` 在 Vercel 多实例下每个 Function 实例独立一份,同一 visitorId 跨实例请求不累计,限流几乎形同虚设。修复思路:换 Upstash Redis(Vercel Marketplace 一键集成,免费额度对 MVP 够用),原代码已预埋 TODO 注释指向该方向
+- **下一步**:**Step 17 — C 端匿名历史恢复(方向 A,visitorId + localStorage 恢复)**,是否立即启动或观察生产一段时间后再启动,由用户决定
+
+---
+
 ## 1. 技术栈(已锁定,勿改)
 
 | 层 | 选型 |
