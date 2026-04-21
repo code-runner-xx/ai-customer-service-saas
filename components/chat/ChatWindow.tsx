@@ -1,6 +1,7 @@
 'use client';
 
 import { useChat } from '@ai-sdk/react';
+import type { Message } from 'ai';
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { toast } from 'sonner';
 import ReactMarkdown from 'react-markdown';
@@ -24,6 +25,9 @@ interface ChatWindowProps {
   tenantId: string;
   mode: 'playground' | 'public';
   visitorId?: string;
+  // Step 17 方向 A:C 端匿名历史恢复时传入;playground 模式不用(刷新后无历史)
+  initialMessages?: Message[];
+  initialSessionId?: string;
 }
 
 // ---------- 子组件:空状态 ----------
@@ -197,9 +201,12 @@ export default function ChatWindow({
   tenantId,
   mode,
   visitorId,
+  initialMessages,
+  initialSessionId,
 }: ChatWindowProps) {
-  // 跨请求复用 sessionId
-  const sessionIdRef = useRef<string | undefined>(undefined);
+  // 跨请求复用 sessionId;Step 17 历史恢复时接收 initialSessionId,
+  // 让后续新消息继续写入同一 session(否则刷新后发新消息会开新 session,下次刷新又看不到)
+  const sessionIdRef = useRef<string | undefined>(initialSessionId);
   // 提交前保存 input,供 status=error 时还原
   const lastInputRef = useRef('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -214,6 +221,8 @@ export default function ChatWindow({
     setInput,
   } = useChat({
     api: '/api/chat',
+    // Step 17:方向 A 历史回填(useChat v4 的 initialMessages 仅在首次挂载时读一次,非响应式)
+    initialMessages,
     experimental_prepareRequestBody: ({ messages: msgs }) => ({
       messages: msgs.map((m) => ({ role: m.role, content: m.content })),
       tenantId,
@@ -327,6 +336,8 @@ export default function ChatWindow({
           messages.map((message, i) => {
             const isLastAssistant =
               message.role === 'assistant' && i === messages.length - 1;
+            // code-review(Step 17):citations 空时(拒答 / 未加载 / 历史回填的老消息)
+            // latestCitations.length === 0 → showCitations=false → 不渲染空 chip 容器,无空白留痕
             const showCitations =
               isLastAssistant && latestCitations.length > 0;
             return (

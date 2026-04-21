@@ -5,45 +5,11 @@ import type { CoreMessage, JSONValue } from 'ai';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { retrieveContext } from '@/lib/rag/retrieve';
+import { checkRateLimit } from '@/lib/rate-limit';
 
 export const runtime = 'nodejs';
 // Vercel Hobby 默认 10s,流式对话偶尔长一点也更稳
 export const maxDuration = 60;
-
-// ---------- C 端速率限制 ----------
-// TODO: 生产环境替换为 Upstash / Redis，此内存 Map 在多实例下不共享
-// 结构：visitorId → 最近请求的 Unix 毫秒时间戳数组
-const rateLimitMap = new Map<string, number[]>();
-const RATE_LIMIT_WINDOW_MS = 60_000; // 60 秒
-const RATE_LIMIT_MAX = 20;           // 每窗口最多 20 条
-// MVP 懒清理阈值：Map 超过 1000 个 key 时扫描删除不活跃条目
-// 生产环境换 Redis 后此逻辑随之移除
-const LAZY_CLEANUP_THRESHOLD = 1000;
-
-function checkRateLimit(visitorId: string): boolean {
-  const now = Date.now();
-  const timestamps = (rateLimitMap.get(visitorId) ?? []).filter(
-    (t) => now - t < RATE_LIMIT_WINDOW_MS,
-  );
-
-  if (timestamps.length >= RATE_LIMIT_MAX) {
-    return false; // 超限
-  }
-
-  timestamps.push(now);
-  rateLimitMap.set(visitorId, timestamps);
-
-  // 懒清理：仅在 Map 过大时才遍历，避免每次请求都扫全表
-  if (rateLimitMap.size > LAZY_CLEANUP_THRESHOLD) {
-    for (const [key, ts] of rateLimitMap) {
-      if (ts.every((t) => now - t >= RATE_LIMIT_WINDOW_MS)) {
-        rateLimitMap.delete(key);
-      }
-    }
-  }
-
-  return true; // 允许
-}
 
 // ---------- zod 入参校验 ----------
 const MessageSchema = z
@@ -105,11 +71,11 @@ export async function POST(request: Request) {
     );
   }
 
-  // C 端速率限制
+  // C 端速率限制(实现见 lib/rate-limit.ts,与 /api/chat/history 共享键空间)
   if (!isOwner && visitorId) {
     if (!checkRateLimit(visitorId)) {
       return new Response(
-        JSON.stringify({ error: '请求过于频繁，请稍后再试' }),
+        JSON.stringify({ error: '请求过于频繁,请稍后再试' }),
         { status: 429, headers: { 'Content-Type': 'application/json' } },
       );
     }

@@ -250,6 +250,37 @@ shadcn base-nova 预设的底层是 `@base-ui/react`,API 与老的 Radix 版 sha
 
 ---
 
+## 0.12 Step 17 完成记录
+
+- **Step 17 完成时间**:2026-04-22
+- **已完成**:C 端匿名历史恢复(方向 A,visitorId + localStorage)。
+  - 新建 `lib/rate-limit.ts`:把 inline 限流从 `/api/chat` 搬家(`checkRateLimit` + 窗口常量 + 懒清理),与 history 端点共享同一 `rateLimitMap` 实例
+  - 新建 `app/api/chat/history/route.ts`:GET 端点,admin client + 双条件过滤,返回最近一条 session 的 messages + sessionId
+  - 修改 `components/chat/ChatWindow.tsx`:新增 `initialMessages` / `initialSessionId` props,`sessionIdRef` 用 `initialSessionId` 初始化
+  - 修改 `app/chat/[tenantId]/PublicChatClient.tsx`:visitorId + history fetch **双 ready 才挂载** ChatWindow,避免 useChat v4 `initialMessages` 非响应式导致回填失败
+  - 修改 `app/api/chat/route.ts`:inline 限流替换为 `checkRateLimit` import,行为不变
+- **关键技术点 / 踩坑**:
+  1. **useChat v4 `initialMessages` 非响应式**:只在首次挂载时读一次,后续 state 变更不会刷新。因此 `PublicChatClient` 必须**双 ready 检查**(`visitorId !== null && history !== null`),未就绪期间渲染占位 `<div class="h-full" />`;不能让 ChatWindow 先以 undefined 挂载再等 history。
+  2. **`sessionIdRef` 用 `initialSessionId` 初始化**:`useRef<string | undefined>(initialSessionId)`。刷新后用户发新消息,`experimental_prepareRequestBody` 从 ref 读出历史 sessionId,让后端 `/api/chat` 复用同一 session,而不是每次刷新开新 session——否则多次刷新会产生多个断裂 session,下次历史只能恢复最后一段,中间断层全丢。
+  3. **admin client 双条件过滤 `WHERE user_id = tenantId AND visitor_id = visitorId`**:admin client 绕过 RLS,任缺其一都是跨租户泄漏。`chat_messages` 表没有 `user_id` 列,只能靠 `session_id` 间接隔离,session 查询必须严。SQL 已验证:V-A(A 租户的 visitor_id)注入 B 租户页面刷新后,`chat_sessions` 里 `visitor_id=V-A` 仍只有 `user_id=A` 那一行,B 租户拿不到 A 的任何历史。
+  4. **role 白名单 `.in('role', ['user','assistant'])`**:schema 允许 `system`,这里显式排除,防御性地避免 system prompt 未来被灌回前端(当前写库路径不写 system,但约束宽,防御先行)。
+  5. **共享 `rateLimitMap` 键空间**:`/api/chat` 和 `/api/chat/history` 都 import `lib/rate-limit.ts` 里同一个 `rateLimitMap`(ESM 模块缓存保证同进程只有一份)。如果各自一套 Map,攻击者在两端点间交替轮询即可绕过单端点配额。
+  6. **citations 历史未回填**(方向 A 已知权衡):`/api/chat/history` 返回的 messages 不带 citations——citations 当前只从 useChat 的 data part 取,而历史 citations 虽然持久化在 `chat_messages.citations` 里,前端没消费。对齐需在 ChatWindow 内建 `Map<messageId, Citation[]>` 架构,成本超出 Step 17 范围,作为锦上添花项保留。顺手 code review 确认 citations 空时的 chip 容器守卫(`latestCitations.length > 0`)已正确,未引入新行为。
+- **用户验收记录**(5 组):
+  1. 组 1 新访客基线 —— ✅
+  2. 组 2 刷新历史恢复 + 4 条对话跨刷新持续存在 —— ✅(SQL 验证 sessionId 复用,未产生新 session)
+  3. 组 3 速率限制 —— **跳过**(本地单进程能真触发,但 Serverless 已知失效,对齐 Step 16 待办 d,留到 Step 18+ 换 Upstash Redis 再真验)
+  4. 组 4 跨租户隔离 —— ✅(SQL 验证:V-A 注入 B 租户页面后,`chat_sessions` 里 `visitor_id=V-A` 仍只有 A-UUID 一行,B 租户偷不到 A 的历史)
+  5. 组 5 Playground 不受影响 —— ✅
+- **Step 16 遗留 4 条待办现状**:
+  - (a) embedding 批量未按字节切片,超长 URL 触发 SiliconFlow 413 —— **保留**,未修
+  - (b) 拒答时 ChatWindow 仍显示 citations chip —— **保留**(Step 17 顺手加了 code review 注释确认 `latestCitations.length > 0` 守卫已正确,未引入新行为)
+  - (c) 公开聊天页刷新丢历史 —— **本步天然覆盖,已闭环**
+  - (d) 速率限制内存 Map Serverless 失效 —— **保留**,待 Step 18+ 换 Upstash Redis
+- **下一步**:Step 18(OCR + 异步化)仍处于"预告,待用户触发"状态,未启动
+
+---
+
 ## 1. 技术栈(已锁定,勿改)
 
 | 层 | 选型 |
