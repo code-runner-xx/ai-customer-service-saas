@@ -38,7 +38,7 @@ export default function EmbedCodeCard({ scriptTag }: Props) {
             复制代码
           </Button>
           <p className="text-xs text-muted-foreground">
-            嵌入功能将在后续版本启用，当前复制的代码暂不生效
+            粘贴到目标网站 &lt;body&gt; 底部即可生效
           </p>
         </div>
       </CardContent>

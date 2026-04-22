@@ -78,7 +78,7 @@ export async function POST(request: Request) {
 
   if (file.size > MAX_FILE_SIZE) {
     return NextResponse.json(
-      { error: `文件过大,最大允许 ${MAX_FILE_SIZE / 1024 / 1024}MB` },
+      { error: '文件过大,单文件需 ≤ 4.5MB(Vercel 免费版限制)' },
       { status: 413 },
     );
   }

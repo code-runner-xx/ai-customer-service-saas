@@ -1,6 +1,8 @@
 import { z } from "zod";
 
-export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+// Step 19 (h):Vercel Hobby 请求体上限 4.5MB(含 multipart 开销),故前后端统一按此值。
+// 换付费 plan 或走 Blob 直传可放宽,属架构级改动不在本 Step 范围。
+export const MAX_FILE_SIZE = 4.5 * 1024 * 1024; // 4.5MB
 export const MIN_TEXT_LENGTH = 20;
 export const CHUNK_INSERT_BATCH = 100;
 

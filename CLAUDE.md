@@ -281,6 +281,43 @@ shadcn base-nova 预设的底层是 `@base-ui/react`,API 与老的 Radix 版 sha
 
 ---
 
+## 0.13 Step 19 完成记录
+
+- **Step 19 完成时间**:2026-04-22
+- **编号说明**:Step 18(OCR + 异步化)仍保持"预告,待触发",为避免编号冲突,本次打包修技术债务使用 Step 19。
+- **已完成**:集中修 Step 16 遗留 4 条待办 + Step 11 遗留 1 条过期文案,5 项一次性收尾。
+  - **(a) embedding 批量 413**:`lib/rag/embed-core.ts` `BATCH_SIZE` 由 100 改为 24,加字符阈值 `MAX_BATCH_CHARS = 300_000` 作防御性兜底,嵌入逻辑改双阈值串行切批(条数 / 字符任一触顶即切)
+  - **(b) 拒答仍显 citations chip**:`app/api/chat/route.ts` 加 `REFUSAL_MARKERS = ['没有找到相关信息', '联系人工客服']` + `isRefusalText()`,在 `streamText` 的 `onFinish` 里用文本匹配识别拒答,匹配中则把 `finalCitations` 置空;`dataStream.writeData` 推送 citations 改在 `await result.text` 之后,用清洗过的 `finalCitations`;写库同步用 `finalCitations`,保证 `chat_messages.citations` 也不落脏数据
+  - **(e) PDF/URL 加载层噪声**:`lib/rag/loader.ts` 新增 `cleanNoise(text)` 做行级清理(关键字黑名单 / 纯电话行 / 纯邮箱行 / 纯 URL 行 / 营业时间段格式 / ≤2 字孤立行),`loadPdf` 和 `loadUrl` 出口均过 `cleanNoise`;cheerio 选择器收紧为 `[class*="ads"], [class*="ad-"], [class^="ad-"], [class$="-ad"]` + `[class*="banner"], [id*="footer"], [class*="sidebar"], [class*="recommend"], aside`
+  - **(g) Deploy 页过期文案**:`app/(dashboard)/deploy/_components/EmbedCodeCard.tsx` 把"嵌入功能将在后续版本启用,当前复制的代码暂不生效"替换为"粘贴到目标网站 `<body>` 底部即可生效"
+  - **(h) 前端 4.5MB 拦截**:`lib/validators/ingest.ts` `MAX_FILE_SIZE` 由 10MB 改为 4.5MB(Vercel Hobby 请求体上限),`app/api/ingest/file/route.ts` 413 文案同步,`app/(dashboard)/knowledge/upload/page.tsx` 本地常量 + toast + 显示文案 + 拖拽区提示全部改为"最大 4.5MB(Vercel 免费版限制)"
+- **主要踩坑 / 决策**:
+  1. **(a) 首版修错了限制类型**:第一次把 `BATCH_SIZE` 留 100 只加 `MAX_BATCH_CHARS = 300_000`,2.3MB txt 仍然 413(每批 100 × 800 = 80K 字,远低于 300K 阈值)。WebFetch SiliconFlow 官方文档 `docs.siliconflow.cn/cn/api-reference/embeddings/create-embeddings` 找到决定性依据:**"the maximum array size is 32"**——限制是**数组条数**,不是字节/tokens。原 `BATCH_SIZE = 100` 直接违反硬上限。改 24(32 × 75% 安全垫)后 2.3MB 中文 txt 切出 507 chunks 成功入库。字符阈值暂时不触发但零成本保留,防未来 chunkSize 放大。
+  2. **(a) 单文件超长的 60s `maxDuration` 隐患**:24/批串行,960 chunks ÷ 24 = 40 批,单批 1-2s → 40-80s,对最大文件(≈2.3MB 中文)已触顶 Vercel `maxDuration=60s`。本 Step 不解决,作为 Step 18 异步化的触发条件之一记在下文"遗留"清单。
+  3. **(b) 文本匹配 vs 数组长度判断**:原想"citations 空就不推",但实际检索也可能零命中却模型仍硬答(system prompt 虽要求拒答但不保证)。最终用"模型实际输出文本是否包含拒答双标记"作判定——两个标记必须同时出现才算拒答,单独出现"联系人工客服"的正经答案不会误判。
+  4. **(e) `cleanNoise` 和 `chunk.ts` 分工要写死注释**:cleanNoise 是**行级**(整行命中规则就丢整行,只作用于 loader 出口);`chunk.ts` 的 `trim().length < 20` 是**块级**(RecursiveCharacterTextSplitter 切块后过滤碎片)。两层互补,修改规则时要对号入座,已在 `loader.ts` 函数头注释写清楚。
+  5. **(e) cheerio 选择器收紧的取舍**:最初想 `[class*="ad"]` 一把梭,但会误伤 `header`(含 "ead")/ `card`(含 "ard")。四选择器组合 `[class*="ads"], [class*="ad-"], [class^="ad-"], [class$="-ad"]` 保留 `ads-top` / `ad-banner` / `google-ad` / `right-ad` 等真实广告命中率,零误伤。
+  6. **(e) 文档站导航/搜索栏漏过**:主目标"原来'你好'返回 CSDN 客服电话"现象消失,但文档类网站(如 SiliconFlow 官网)的侧边导航、搜索栏仍会被 cheerio 抓进正文。通用选择器覆盖不到,需要按站点定制白名单(如只取 `article` / `main`)。作为新债务 (e2) 记入遗留。
+  7. **(h) 前后端统一走 4.5MB 而非留宽一侧**:Vercel Hobby 的 4.5MB 上限是请求体(含 multipart 开销),前端拦早于 API,避免浪费一次请求。上传页注释已标"换付费 plan 或走 Blob 直传可放宽",属架构级改动不在本 Step 范围。
+- **验收记录**(5 项):
+  1. (a) embedding 413 —— ✅ BATCH_SIZE=24 生效,2.3MB 中文 txt 切出 507 chunks 成功入库
+  2. (b) 拒答无 chip —— ✅ 问"火星上有水吗"拒答干净无 chip;问知识库内真实问题"HSxV"正常带引用
+  3. (e) 加载清洁 —— ✅ 主目标"'你好' 返回 CSDN 客服电话"现象消失;**遗留子问题**:文档站导航/搜索栏仍会抓进正文(新债务 e2,不阻塞本 Step)
+  4. (g) Deploy 文案 —— ✅ "粘贴到目标网站 `<body>` 底部即可生效" 已显示
+  5. (h) 4.5MB 拦截 —— ✅ 31.6MB PDF 选中即 toast 拦截,根本不发请求
+- **技术债务清单更新**(相对 Step 16 / 17):
+  - (a) embedding 批量 413 —— ✅ **已修复闭环**(BATCH_SIZE=24 + 字符阈值防御性兜底)
+  - (b) 拒答时 citations chip —— ✅ **已修复闭环**(onFinish 文本匹配清洗 finalCitations)
+  - (c) 公开页刷新丢历史 —— ✅ 已在 Step 17 闭环
+  - (d) 速率限制内存 Map Serverless 失效 —— **保留**,待 Step 18+ 换 Upstash Redis
+  - (e) 加载噪声主修复闭环,新增子债务 (e2) —— **遗留**:文档站导航/搜索栏抓进正文,通用 cheerio 选择器覆盖不到,需按站点定制白名单(如限定 `article` / `main`),待真实需求触发再动
+  - (g) Deploy 过期文案 —— ✅ **已修复闭环**
+  - (h) 上传前端 4.5MB 拦截 —— ✅ **已修复闭环**
+  - **新增 (i) 单文件超长导致 60s `maxDuration` 风险** —— **遗留**:2.3MB 中文 txt 估算 40-80s,已触顶 Vercel Hobby 默认 60s `maxDuration`。属架构性问题,不在 Step 19 范围,作为 **Step 18 异步化触发条件之一**合并处理。
+- **下一步**:Step 18(OCR + 异步化)仍保持"预告,待用户触发"状态,未启动。触发条件:扫描件真实需求 ≥ 3 份 **或** 单文件 embedding 超时投诉首次出现。
+
+---
+
 ## 1. 技术栈(已锁定,勿改)
 
 | 层 | 选型 |

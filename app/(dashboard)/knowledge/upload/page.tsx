@@ -17,7 +17,8 @@ import {
 } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
+// Step 19 (h):Vercel Hobby 4.5MB 请求体上限,前后端统一;> 4.5MB 前端直接拦,避免 Vercel 上游返 400
+const MAX_FILE_SIZE = 4.5 * 1024 * 1024;
 const ALLOWED_EXTS = ["pdf", "txt", "docx"] as const;
 // input accept 和 drop 判定的 MIME/后缀白名单
 const FILE_ACCEPT =
@@ -46,7 +47,7 @@ function isAllowedFile(file: File): { ok: true } | { ok: false; reason: string }
   if (file.size > MAX_FILE_SIZE) {
     return {
       ok: false,
-      reason: `文件过大,最大 ${MAX_FILE_SIZE / 1024 / 1024}MB`,
+      reason: "文件过大,单文件需 ≤ 4.5MB(Vercel 免费版限制)",
     };
   }
   return { ok: true };
@@ -198,7 +199,7 @@ export default function KnowledgeUploadPage() {
               <span className="text-muted-foreground"> 或拖拽到此处</span>
             </div>
             <div className="text-xs text-muted-foreground">
-              支持 PDF、Word(.docx)、TXT,最大 10MB
+              支持 PDF、Word(.docx)、TXT,最大 4.5MB(Vercel 免费版限制)
             </div>
             <div className="text-xs text-muted-foreground/80">
               暂不支持 .doc 老格式和扫描件 PDF(图像 PDF)
@@ -212,6 +213,11 @@ export default function KnowledgeUploadPage() {
               onChange={(e) => handleFile(e.target.files?.[0])}
             />
           </label>
+
+          {/* Step 19 (e):知识库清洁度提示 */}
+          <p className="text-xs text-amber-600 dark:text-amber-500">
+            ⚠️ 建议上传正文清洁的 PDF(Word 导出 &gt; 浏览器打印)。广告、页脚、侧栏会被一并读入知识库,影响回答准确度
+          </p>
 
           {file ? (
             <div className="flex items-center justify-between rounded-md border bg-muted/30 p-3 text-sm">
@@ -257,6 +263,10 @@ export default function KnowledgeUploadPage() {
             />
             <p className="text-xs text-muted-foreground">
               系统会抓取网页正文(去除脚本、导航、页脚等),再切块入库
+            </p>
+            {/* Step 19 (e):复杂布局噪声提醒 */}
+            <p className="text-xs text-amber-600 dark:text-amber-500">
+              ⚠️ 系统会自动过滤页脚、广告、推荐栏,但复杂布局仍可能带入噪声。建议首选内容型网页
             </p>
           </div>
           <Button

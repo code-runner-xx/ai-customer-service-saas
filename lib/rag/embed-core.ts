@@ -9,7 +9,13 @@ import OpenAI from 'openai';
 
 export const EMBEDDING_MODEL = 'BAAI/bge-m3';
 export const EMBEDDING_DIM = 1024;
-const BATCH_SIZE = 100;
+// Step 19 (a) 修正:SiliconFlow /v1/embeddings 官方文档明确 input 数组上限 32 条,
+// 原值 100 直接违反硬上限,触发 413。取 24(32 × 75%)留安全垫,避免边缘 tokenizer 抖动踩线。
+// BAAI/bge-m3 单条 8192 tokens 上限远高于 chunkSize=800 字 ≈ 1600 tokens,单条不会超。
+const BATCH_SIZE = 24;
+// 字符阈值当前实际不触发(24 × 800 ≈ 19K 远低于 300K),作为防御性兜底保留:
+// 若未来 chunkSize 放大或出现超长 chunk,此阈值会比 BATCH_SIZE 先切批。
+const MAX_BATCH_CHARS = 300_000;
 const MAX_RETRIES = 2;
 
 export interface EmbedConfig {
@@ -59,8 +65,27 @@ export async function embedTextsWithConfig(
   });
 
   const out: number[][] = [];
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    const batch = texts.slice(i, i + BATCH_SIZE);
+  // Step 19 (a):双阈值串行分批,每批先触 BATCH_SIZE(100 条)或 MAX_BATCH_CHARS(30 万字)任一上限就切。
+  // 串行(非并发),避免打满 SiliconFlow 速率。
+  let i = 0;
+  while (i < texts.length) {
+    const batch: string[] = [];
+    let batchChars = 0;
+    while (
+      i < texts.length &&
+      batch.length < BATCH_SIZE &&
+      batchChars + texts[i].length <= MAX_BATCH_CHARS
+    ) {
+      batch.push(texts[i]);
+      batchChars += texts[i].length;
+      i++;
+    }
+    // 防呆:单条 > MAX_BATCH_CHARS 时(chunkSize=800 理论不会发生,但切块器边界可能),
+    // 强行把该条单独成批送出,让 API 自己处理,避免死循环
+    if (batch.length === 0) {
+      batch.push(texts[i]);
+      i++;
+    }
     const vectors = await embedBatch(client, batch);
     for (const v of vectors) {
       if (v.length !== EMBEDDING_DIM) {

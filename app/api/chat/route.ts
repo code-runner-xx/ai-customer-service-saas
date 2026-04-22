@@ -37,6 +37,15 @@ interface Citation {
   similarity: number;
 }
 
+// ---------- Step 19 (b):拒答检测 ----------
+// System prompt 原话:"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。"
+// 取两串高辨识度片段做 AND 匹配:容忍 LLM 微改标点/缺字,也避免真实答案里偶尔出现单串被误伤。
+// 命中 → citations 置空,DB 和前端 data part 同步不渲染引用 chip。
+const REFUSAL_MARKERS = ['没有找到相关信息', '联系人工客服'];
+function isRefusalText(text: string): boolean {
+  return REFUSAL_MARKERS.every((m) => text.includes(m));
+}
+
 // ---------- POST handler ----------
 export async function POST(request: Request) {
   // 1. 解析并校验请求体
@@ -151,11 +160,19 @@ ${contextText}`;
       // 先把 sessionId 推给前端
       dataStream.writeData({ type: 'session', sessionId: finalSid } as unknown as JSONValue);
 
+      // Step 19 (b):finalCitations 由 onFinish 的拒答判定改写,DB insert + writeData 共用同一变量,
+      // 保证数据库记录 / 前端 data part 两处 citations 一致(后端闭环,前端 / 历史恢复都不会再渲染空 chip)。
+      // AI SDK v4 guarantees:onFinish 在 result.text 解析前 await 完成,此处读取 finalCitations 安全。
+      let finalCitations: Citation[] = citations;
+
       const result = streamText({
         model,
         system: systemPrompt,
         messages: messages as unknown as CoreMessage[],
         onFinish: async ({ text }) => {
+          if (isRefusalText(text)) {
+            finalCitations = [];
+          }
           // 写库失败不影响已流给用户的响应
           try {
             await admin.from('chat_messages').insert([
@@ -169,7 +186,7 @@ ${contextText}`;
                 session_id: finalSid,
                 role: 'assistant',
                 content: text,
-                citations: citations,
+                citations: finalCitations,
               },
             ]);
           } catch (e) {
@@ -181,9 +198,9 @@ ${contextText}`;
       // 把 LLM 流合并进 dataStream
       result.mergeIntoDataStream(dataStream);
 
-      // 等 LLM 全部生成完毕,再把 citations 推给前端
+      // 等 LLM 全部生成完毕(onFinish 已 await 完成),再把 finalCitations 推给前端
       await result.text;
-      dataStream.writeData({ type: 'citations', citations } as unknown as JSONValue);
+      dataStream.writeData({ type: 'citations', citations: finalCitations } as unknown as JSONValue);
     },
     onError: (err) => {
       console.error('[chat] stream error:', err);
