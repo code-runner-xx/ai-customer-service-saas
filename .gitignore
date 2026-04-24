@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 本地 widget 调试副本（含真实 tenantId，禁止入仓库/生产）
+/public/test-widget.html
+/public/debug-*.html
+
