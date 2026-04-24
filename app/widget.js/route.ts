@@ -50,6 +50,39 @@ function buildScript(appUrl: string, tenantId: string): string {
     '<line x1="6" y1="6" x2="18" y2="18"/>' +
     '</svg>';
 
+  // ---- 品牌色常量 ----
+  var ACCENT_BRAND = 'oklch(0.488 0.196 264)';  // FAB 关闭态:与 C 端聊天页用户气泡同色
+  var DEEP_GREY = 'oklch(0.3 0 0)';             // FAB 打开态:避免与强调色打架,保持单色稀缺
+
+  // ---- 注入 style 标签:tooltip 基础样式 + 窄屏 media query ----
+  // inline style 无法写 @media 规则,只能通过 stylesheet;媒体查询用 !important 覆盖 inline
+  var styleEl = document.createElement('style');
+  styleEl.id = '__aics_styles';
+  styleEl.textContent =
+    "#__aics_tooltip{" +
+      "position:fixed;bottom:40px;right:92px;z-index:2147482999;" +
+      "background:#fff;color:oklch(0.145 0 0);font-size:13px;" +
+      "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
+      "padding:8px 12px;border-radius:8px;" +
+      "border:1px solid oklch(0.922 0 0);" +
+      "box-shadow:0 2px 8px rgba(0,0,0,.08);" +
+      "white-space:nowrap;cursor:default;" +
+      "display:flex;align-items:center;" +
+    "}" +
+    "#__aics_tooltip::after{" +
+      "content:'';position:absolute;right:-5px;top:50%;" +
+      "width:10px;height:10px;background:#fff;" +
+      "border-top:1px solid oklch(0.922 0 0);" +
+      "border-right:1px solid oklch(0.922 0 0);" +
+      "transform:translateY(-50%) rotate(45deg);" +
+      "border-top-right-radius:3px;" +
+    "}" +
+    "@media (max-width:400px){" +
+      "#__aics_btn{right:16px !important;}" +
+      "#__aics_tooltip{right:88px !important;}" +
+    "}";
+  document.head.appendChild(styleEl);
+
   // ---- iframe 容器（id 前缀 __aics_ 避免与宿主页面冲突）----
   var frame = document.createElement('div');
   frame.id = '__aics_frame';
@@ -68,10 +101,10 @@ function buildScript(appUrl: string, tenantId: string): string {
   btn.style.cssText =
     'position:fixed;bottom:24px;right:24px;z-index:2147483000;' +
     'width:56px;height:56px;border-radius:50%;' +
-    'background:#2563eb;border:none;cursor:pointer;' +
+    'background:' + ACCENT_BRAND + ';border:none;cursor:pointer;' +
     'box-shadow:0 4px 12px rgba(0,0,0,.25);' +
     'display:flex;align-items:center;justify-content:center;padding:0;' +
-    'transition:filter .15s;';
+    'transition:filter .15s,background .2s;';
   btn.innerHTML = ICON_CHAT;
 
   btn.addEventListener('mouseenter', function () {
@@ -80,6 +113,12 @@ function buildScript(appUrl: string, tenantId: string): string {
   btn.addEventListener('mouseleave', function () {
     btn.style.filter = '';
   });
+
+  // ---- tooltip:闭合态常驻招呼语,打开后隐藏 ----
+  // 方案 a(无淡入/无延迟):加载即可见,点 FAB 打开时 display:none,关闭恢复
+  var tooltip = document.createElement('div');
+  tooltip.id = '__aics_tooltip';
+  tooltip.textContent = '有什么可以帮您?';
 
   // ---- 布局计算：移动端全屏 / 桌面端悬浮窗 ----
   function applyFrameStyle(visible) {
@@ -110,6 +149,8 @@ function buildScript(appUrl: string, tenantId: string): string {
     applyFrameStyle(true);
     btn.innerHTML = ICON_CLOSE;
     btn.setAttribute('aria-label', '关闭客服窗口');
+    btn.style.background = DEEP_GREY;
+    tooltip.style.display = 'none';
   }
 
   function close() {
@@ -117,6 +158,8 @@ function buildScript(appUrl: string, tenantId: string): string {
     applyFrameStyle(false);
     btn.innerHTML = ICON_CHAT;
     btn.setAttribute('aria-label', '打开客服窗口');
+    btn.style.background = ACCENT_BRAND;
+    tooltip.style.display = 'flex';
   }
 
   function toggle() {
@@ -129,6 +172,7 @@ function buildScript(appUrl: string, tenantId: string): string {
   applyFrameStyle(false);
   document.body.appendChild(frame);
   document.body.appendChild(btn);
+  document.body.appendChild(tooltip);
 
   // ---- 全局 API ----
   window.AICS = { open: open, close: close, toggle: toggle };

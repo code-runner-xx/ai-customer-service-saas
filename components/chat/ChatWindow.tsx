@@ -8,7 +8,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { SendHorizonal, Loader2 } from 'lucide-react';
+import { SendHorizonal, Loader2, MessageCircleQuestion } from 'lucide-react';
 
 // ---------- Citation 类型 ----------
 interface Citation {
@@ -33,12 +33,11 @@ interface ChatWindowProps {
 // ---------- 子组件:空状态 ----------
 function EmptyState({ mode }: { mode: 'playground' | 'public' }) {
   if (mode === 'public') {
+    // 副标题的免责文案已搬家到输入框下方常驻(见主组件底部),这里只保留图标 + 问候语
     return (
       <div className="flex flex-col items-center justify-center h-full py-16 gap-2">
+        <MessageCircleQuestion className="size-10 text-muted-foreground/60" />
         <p className="text-base font-medium text-foreground">您好，请问有什么可以帮您？</p>
-        <p className="text-sm text-muted-foreground">
-          回答基于产品知识库，如需人工服务请联系客服。
-        </p>
       </div>
     );
   }
@@ -66,7 +65,7 @@ function MessageBubble({
       <div
         className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm break-words ${
           isUser
-            ? 'bg-primary text-primary-foreground rounded-br-sm whitespace-pre-wrap'
+            ? 'bg-accent-brand text-accent-brand-fg rounded-br-sm whitespace-pre-wrap'
             : 'bg-muted text-foreground rounded-bl-sm'
         }`}
       >
@@ -159,8 +158,8 @@ function CitationsList({ citations }: { citations: Citation[] }) {
               onClick={() => toggle(c.index)}
               className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs transition-colors ${
                 isOpen
-                  ? 'border-primary/30 bg-primary/10 text-primary'
-                  : 'border-border text-muted-foreground hover:border-primary/30 hover:text-foreground'
+                  ? 'border-accent-brand/30 bg-accent-brand/[0.06] text-accent-brand'
+                  : 'border-border bg-[oklch(0.985_0_0)] text-muted-foreground hover:border-accent-brand/30 hover:text-foreground'
               }`}
             >
               来源 {c.index}
@@ -390,7 +389,7 @@ export default function ChatWindow({
             type="submit"
             size="icon"
             disabled={isStreaming || !input.trim()}
-            className="shrink-0"
+            className="shrink-0 bg-accent-brand text-accent-brand-fg hover:bg-accent-brand/90"
           >
             {isStreaming ? (
               <Loader2 className="size-4 animate-spin" />
@@ -399,6 +398,12 @@ export default function ChatWindow({
             )}
           </Button>
         </form>
+        {/* C 端常驻免责文案:从 EmptyState 副标题搬家至此,保证首轮消息后仍可见 */}
+        {mode === 'public' && (
+          <p className="mt-1.5 px-2 text-xs text-[oklch(0.708_0_0)]">
+            回答基于产品知识库,如需人工服务请联系客服。
+          </p>
+        )}
       </div>
     </div>
   );

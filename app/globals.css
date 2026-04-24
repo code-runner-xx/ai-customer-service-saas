@@ -29,6 +29,8 @@
   --color-destructive: var(--destructive);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
+  --color-accent-brand: var(--accent-brand);
+  --color-accent-brand-fg: var(--accent-brand-fg);
   --color-muted-foreground: var(--muted-foreground);
   --color-muted: var(--muted);
   --color-secondary-foreground: var(--secondary-foreground);
@@ -63,6 +65,10 @@
   --muted-foreground: oklch(0.556 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
+  /* C 端品牌强调色（Linear-style indigo）。只用于 C 端访客触点：用户气泡、发送按钮、citation chip 活跃态。
+     故意与 --primary 分离——B 端沿用中性黑白 --primary,accent-brand 仅作为 C 端强调色稀缺出现。 */
+  --accent-brand: oklch(0.488 0.196 264);
+  --accent-brand-fg: oklch(0.985 0 0);
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
