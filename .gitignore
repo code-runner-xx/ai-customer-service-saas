@@ -40,7 +40,13 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# ±¾µØ widget µ÷ÊÔ¸±±¾£¨º¬ÕæÊµ tenantId£¬½ûÖ¹Èë²Ö¿â/Éú²ú£©
+# æœ¬åœ° widget è°ƒè¯•å‰¯æœ¬ï¼ˆå«çœŸå® tenantIdï¼Œç¦æ­¢å…¥ä»“åº“/ç”Ÿäº§ï¼‰
 /public/test-widget.html
 /public/debug-*.html
 
+# å†…éƒ¨äº¤æ¥æ–‡æ¡£ï¼ˆæœ¬åœ°ä¿ç•™ï¼Œä¸å…¥ä»“åº“ï¼‰
+HANDOFF.md
+CLAUDE.md
+
+# Claude Code æœ¬åœ°é…ç½®ï¼ˆå«æœ¬æœºç»å¯¹è·¯å¾„ï¼‰
+.claude/settings.local.json
