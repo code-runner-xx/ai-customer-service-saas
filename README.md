@@ -238,3 +238,42 @@ PDF 解析自 Step 15 起改用纯 ESM 的 `unpdf`，无此问题。
 **Q：上传扫描件 / 图像 PDF 报错"暂不支持 OCR"**
 
 当前版本对 PDF 启用启发式扫描件检测（页数 ≥ 2 且平均字符 < 50 字/页 → 判定为扫描件并拒绝）。请提供带文字层的 PDF。OCR 支持已规划在 Step 18，触发条件为真实需求 ≥ 3 份。
+
+
+## 协作说明
+
+本项目使用 Anthropic 的 Claude 系列工具作为主要开发协作伙伴，
+开发者与 AI 的分工如下,如实陈述以供有意了解 AI 协作开发的读者参考。
+
+### 开发者承担
+
+- 产品定位、功能优先级、上线时机
+- 每一步的需求描述与边界界定
+- 所有改动的人工审阅、本地验证、Vercel preview 验证
+- 决定何时合并 main、何时放弃某个方向、何时记录为遗留债务
+- 对最终产品质量负责
+
+### Claude 承担
+
+- **Claude Code**(Opus 4.7):全部应用代码的实际编写,包括 RAG 摄取/
+  检索管线、Next.js 路由与组件、widget 嵌入脚本、TypeScript 类型设计、
+  数据库 SQL 与 RLS 策略起草
+- **Claude Design**:UI kit 视觉系统设计、组件原型迭代、
+  设计 token 与 accent 色方案
+- 踩坑记录、技术债务整理、commit message 撰写
+
+### 工作流约束
+
+每个开发步骤遵循"先报备 → 等确认 → 动手 → 验收 → 停下"的循环,
+禁止跳步,禁止一次性大规模改动。所有 Claude Code 写入的 commit
+带 `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>` 尾签,
+git log 可查。
+
+### 透明声明
+
+代码层面绝大多数实际书写工作由 Claude Code 完成,开发者主要承担
+"提出需求 → 审核产出 → 决定是否采纳"的角色。这个项目展示的是
+**人机协作的工作流设计能力**和**AI 输出的判断力**,而不是开发者
+独立的 coding throughput。
+
+如对具体协作过程感兴趣,欢迎查看 commit history。
