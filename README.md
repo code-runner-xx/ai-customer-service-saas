@@ -2,14 +2,17 @@
 
 企业级多租户 AI 知识库 + 智能客服 SaaS MVP。企业主上传私有文档，系统自动切块向量化；终端用户通过公开链接或嵌入 Widget 与 AI 客服对话，回答严格基于 RAG 检索，引用原文不编造。
 
+**线上 Demo**：[https://ai-customer-service-saas.vercel.app](https://ai-customer-service-saas.vercel.app)（Vercel Hobby 部署，可注册体验）
+
 ---
 
 ## 功能亮点
 
-- **文档上传自动向量化**：支持 PDF / TXT / 网页 URL，切块后生成 1024 维 embedding 存入 pgvector
+- **文档上传自动向量化**：支持 PDF / TXT / Word (.docx) / 网页 URL，切块后生成 1024 维 embedding 存入 pgvector
 - **RAG 检索问答**：每次对话实时检索最相关 chunks，交给大模型生成回答
 - **引用原文**：AI 回复末尾标注 `[来源 N]`，可展开查看原始文本片段
 - **公开聊天页**：一键生成分享链接 `/chat/{userId}`，访客无需注册即可对话
+- **C 端历史恢复**：访客刷新页面后保留对话上下文（基于 localStorage `visitorId` + tenantId 双条件查询）
 - **嵌入 Widget**：一行 `<script>` 将悬浮聊天按钮嵌入任意第三方网站
 
 ---
@@ -26,6 +29,9 @@
 | Embedding 模型 | BAAI/bge-m3 | 1024 维 |
 | 对话模型 | deepseek-ai/DeepSeek-V3 | — |
 | 文本切块 | @langchain/textsplitters | 0.1.x |
+| PDF 解析 | unpdf（纯 ESM，扫描件硬拒，OCR 待 Step 18） | 1.6.x |
+| Word 解析 | mammoth（仅 `.docx`，`.doc` 老格式不支持） | 1.12.x |
+| 部署 | Vercel Hobby（请求体 4.5MB / `maxDuration` 60s） | — |
 | 包管理器 | pnpm | 10.x |
 
 ---
@@ -74,7 +80,7 @@ create table public.documents (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   title text not null,
-  content_type text not null check (content_type in ('pdf','txt','url')),
+  content_type text not null check (content_type in ('pdf','txt','url','docx')),
   source_url text,
   status text not null default 'processing' check (status in ('processing','ready','failed')),
   error_message text,
@@ -163,7 +169,7 @@ pnpm dev
 
 访问 `http://localhost:3000`，注册账号后：
 
-1. 进入**知识库**页面，上传 PDF / TXT 文件或粘贴网页 URL
+1. 进入**知识库**页面，上传 PDF / TXT / Word (.docx) 文件或粘贴网页 URL
 2. 等待状态变为"就绪"后，进入 **Playground** 测试问答效果
 3. 在**部署**页面复制分享链接或嵌入代码
 
@@ -209,20 +215,26 @@ middleware.ts           # Session 刷新 + 路由守护
 
 Supabase 免费版内置邮件服务有严格速率限制（每小时约 3 封）。开发阶段可在 Dashboard → Authentication → Providers → Email 中关闭 **Confirm email**，生产环境务必重新开启并配置自定义 SMTP（见 [DEPLOYMENT.md](./DEPLOYMENT.md)）。
 
-**Q：上传 PDF 时服务器报错 `TypeError: Object.defineProperty called on non-object`**
+**Q：上传 Word 文档时服务器报错 `TypeError: Object.defineProperty called on non-object`**
 
-`pdf-parse` 库与 Next.js 15 RSC 打包有 CJS/ESM 互操作问题。确认 `next.config.ts` 中包含：
+`mammoth` 是老 CJS 库，与 Next.js 15 RSC 打包有互操作问题。确认 `next.config.ts` 中包含：
 
 ```ts
-serverExternalPackages: ["pdf-parse"],
+serverExternalPackages: ["mammoth"],
 ```
 
 并且 `lib/rag/loader.ts` 中使用动态 import：
 
 ```ts
-const { PDFParse } = await import('pdf-parse');
+const { extractRawText } = await import('mammoth');
 ```
+
+PDF 解析自 Step 15 起改用纯 ESM 的 `unpdf`，无此问题。
 
 **Q：上传文件时报 400 / 请求格式错误**
 
-前端已限制单文件最大 10MB，超过此限制 Next.js 会在到达业务层之前拦截请求并返回 400。请压缩或拆分文件后重试。
+前端已限制单文件最大 4.5MB（Vercel Hobby 请求体上限）。超过此限制 Next.js 会在到达业务层之前拦截请求并返回 400。请压缩或拆分文件后重试，或升级到 Vercel Pro 放宽该限制。
+
+**Q：上传扫描件 / 图像 PDF 报错"暂不支持 OCR"**
+
+当前版本对 PDF 启用启发式扫描件检测（页数 ≥ 2 且平均字符 < 50 字/页 → 判定为扫描件并拒绝）。请提供带文字层的 PDF。OCR 支持已规划在 Step 18，触发条件为真实需求 ≥ 3 份。
