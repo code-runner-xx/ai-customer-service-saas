@@ -1,7 +1,7 @@
 # AI 客服知识库 SaaS —— 新会话交接文档
 
-生成时间:2026-04-22(Step 19 完成版 / 生产上线后)
-当前进度:**P1-P5 MVP(14/14 Step)+ Step 15 docx/PDF 升级 + Step 16 Vercel 上线 + Step 17 C 端匿名历史恢复 + Step 19 5 条技术债务收尾,全部闭环。生产域名 `https://ai-customer-service-saas.vercel.app` 已真实跑通。下一步方向:网页美化打磨(UI/UX 层,不动业务逻辑)。**
+生成时间:2026-04-24(Step 20 完成版 / C 端视觉美化已上线)
+当前进度:**P1-P5 MVP(14/14 Step)+ Step 15 docx/PDF 升级 + Step 16 Vercel 上线 + Step 17 C 端匿名历史恢复 + Step 19 5 条技术债务收尾 + Step 20 C 端视觉美化(accent-brand token + Widget tooltip),全部闭环。生产域名 `https://ai-customer-service-saas.vercel.app` 已真实跑通。下一步方向:由用户决定(B 端美化 / 性能优化 / Step 18 OCR & 异步化任选)。**
 
 ---
 
@@ -44,11 +44,38 @@
 | P7 上线 | S16 Vercel 部署 | ✅ | 2026-04-20,最小可行路径(未拆生产 Supabase、未配 SMTP、未自定义域名,刻意跳过) |
 | P8 C 端体验 | S17 匿名历史恢复 | ✅ | 2026-04-22,方向 A(visitorId + localStorage),双条件过滤 |
 | — | **S19 技术债务打包收尾** | ✅ | 2026-04-22,5 条(a/b/e/g/h)集中修 |
+| P9 C 端视觉 | **S20 视觉美化** | ✅ | 2026-04-24,Linear-style indigo accent-brand,Public Chat + Widget,B 端 25+ 处按钮零触碰 |
 | — | S18 OCR + 异步化 | ⏸ 预告,未启动 | 触发条件:扫描件真实需求 ≥ 3 份 **或** 单文件 embedding 超时投诉首次出现 |
 
 > **Step 编号说明**:Step 18 保留给 OCR + 异步化,本次打包修技术债用 Step 19 避开冲突。
 
 代码、`tsc --noEmit`、`pnpm build`、Vercel 生产部署均通过,真实用户可访问。
+
+### Step 20 视觉美化交付速览(2026-04-24)
+
+**范围**:Public Chat + Widget(严格 C 端,B 端零影响)
+
+**改动文件**(3 文件 +57 净增):
+- `app/globals.css` +6:新增 `--accent-brand` / `--accent-brand-fg` 两个 oklch token + `@theme` 映射
+- `components/chat/ChatWindow.tsx` +7 净增:5 处改动
+- `app/widget.js/route.ts` +44 净增:8 处改动
+
+**视觉成果**:
+- Linear-style indigo `oklch(0.488 0.196 264)` 作为单一品牌强调色,稀缺出现
+- 用户气泡 / 发送按钮 / citation chip active 染 accent
+- citation chip resting 加极淡底色 `oklch(0.985 0 0)`
+- C 端空状态加 `MessageCircleQuestion` 图标
+- public 模式输入框下方常驻免责文案
+- Widget FAB 关闭/打开两态切换(accent / 深灰 `oklch(0.3 0 0)`)
+- Widget tooltip 中文化"有什么可以帮您?" + 3px 圆角指针(方案 a:常驻闭合态可见)
+- `375px @media query` 右边距 16px,大屏保持 24px
+- Widget input 高度 40px(实测 41.6px,达 iOS/Android HIG 标准)
+
+**协作流程**:Claude Design 三轮迭代出 design system → Claude Code 分 Step A/B/C 落地 → 本地 dev 验收 → Vercel Preview 验证 → 合并 main → 生产部署
+
+**验收数据**:B 端 25+ 处 `--primary` 按钮零影响;bundle First Load shared = 102 kB 持平;`tsc --noEmit` 零错;`pnpm build` 5.1s 零错零警告
+
+**新增遗留债 (j)**:品牌名不一致——`app/chat/[tenantId]/page.tsx` 用"AI 智能客服",其他页面用"AI 客服"。历史遗留,5 分钟字符串替换可清理,以后单独做
 
 ---
 
@@ -211,6 +238,7 @@ Vercel Env Vars 中 `NEXT_PUBLIC_APP_URL` 已填生产域名。改 `NEXT_PUBLIC_
 - [x] **`pnpm build` 冒烟**:零 webpack 报错 / 零 Module not found / 零运行时崩溃
 - [x] **公开页刷新历史恢复**(Step 17):visitorId + tenantId 双条件过滤,跨设备丢失是已知权衡
 - [x] **embedding 413 / 拒答空 chip / 加载清洁 / 过期文案 / 4.5MB 拦截**(Step 19 全部闭环)
+- [x] **C 端视觉美化**(Step 20):accent-brand token + ChatWindow + Widget tooltip + 375px 响应式,B 端零触碰 + bundle First Load shared 持平 102 kB
 
 ### ⏸ 待执行(上生产服务真实客户时才必要,自用/演示阶段暂不做)
 
@@ -230,6 +258,7 @@ Vercel Env Vars 中 `NEXT_PUBLIC_APP_URL` 已填生产域名。改 `NEXT_PUBLIC_
 | (e2) | 文档类网站(如 SiliconFlow 官网)导航菜单 / 搜索栏被 cheerio 抓进正文,Step 19 cleanNoise 覆盖不到 | 保留 | 真实客户抱怨知识库混入导航文本 → 按站点定制白名单(如只取 `article` / `main`) |
 | Step 18 (OCR) | 扫描件 PDF 硬拒,无 OCR 支持 | 预告 | 扫描件真实需求 ≥ 3 份 |
 | Step 18 (异步化) | 单文件超长(如 2.3MB 中文 txt 估算 40-80s embedding)触顶 Vercel Hobby 60s `maxDuration` | 预告 | 首次出现 embedding 超时投诉(两个触发点合并走 Step 18) |
+| (j) | 全站品牌名不一致——`app/chat/[tenantId]/page.tsx` 用"AI 智能客服",其他页面用"AI 客服" | 保留 | 5 分钟字符串替换,以后单独做(Step 20 新增) |
 
 ---
 

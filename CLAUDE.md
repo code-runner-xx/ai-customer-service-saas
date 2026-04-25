@@ -107,6 +107,17 @@ shadcn base-nova 预设的底层是 `@base-ui/react`,API 与老的 Radix 版 sha
 
 ---
 
+## ⚠️ 强调色 token 与 unhook 规范(Step 20 踩坑后补充)
+
+C 端引入品牌强调色(如 `--accent-brand`)时,**绝不**改 `--primary` / `--accent` 等已有 token 的值——这会牵连 B 端 25+ 处按钮、卡片、所有引用,等于做了 B 端的事。规范如下:
+
+1. **新 token 加法,不动旧 token**:在 `app/globals.css` `:root` 新增 `--accent-brand: oklch(...)` + `--accent-brand-fg`,**同时**在 `@theme inline` 加映射 `--color-accent-brand: var(--accent-brand)`,Tailwind 4 才会吐出 `bg-accent-brand` / `text-accent-brand-fg` 工具类。
+2. **`<Button>` 局部 unhook 用 tailwind-merge**:base-nova 的 `Button` 走 `cn(buttonVariants({...}, className))`,实例 className 会经 `tailwind-merge` 覆盖 default variant 的 `bg-primary`。即在使用处直接写 `<Button className="bg-accent-brand text-accent-brand-fg hover:bg-accent-brand/90">`,**不动 `components/ui/button.tsx` 源码**——这是 B 端零影响的前提。
+3. **unhook 同 className 字符串里所有 `:hover` / `:focus` / `:active` 同色变体**(踩坑):citation chip 折叠态原本写 `border-border ... hover:border-primary/30`。如果只切了 `isOpen` 分支(active 态)的 `bg-primary`,resting 态 hover 时仍闪一下 `--primary`——视觉残留。规律:**unhook 一个 token,要把同一行/同一块 className 里所有同色变体一并切干净,不留尾巴**。
+4. **Arbitrary opacity 用 `/[0.06]` 不用 `/5` 近似**:Tailwind 4 预设 opacity 表只到 5/10/20/25...。设计系统定的精度(如 6%)用 arbitrary value `bg-accent-brand/[0.06]`,不做"差不多"妥协。
+
+---
+
 ## 0. 项目铁律(Claude Code 必读)
 
 1. **语言**:所有 UI 文案、注释、commit message 使用简体中文;代码标识符使用英文。
@@ -315,6 +326,28 @@ shadcn base-nova 预设的底层是 `@base-ui/react`,API 与老的 Radix 版 sha
   - (h) 上传前端 4.5MB 拦截 —— ✅ **已修复闭环**
   - **新增 (i) 单文件超长导致 60s `maxDuration` 风险** —— **遗留**:2.3MB 中文 txt 估算 40-80s,已触顶 Vercel Hobby 默认 60s `maxDuration`。属架构性问题,不在 Step 19 范围,作为 **Step 18 异步化触发条件之一**合并处理。
 - **下一步**:Step 18(OCR + 异步化)仍保持"预告,待用户触发"状态,未启动。触发条件:扫描件真实需求 ≥ 3 份 **或** 单文件 embedding 超时投诉首次出现。
+
+---
+
+## 0.14 Step 20 完成记录
+
+- **Step 20 完成时间**:2026-04-24
+- **编号说明**:Step 20 = C 端视觉美化,Phase P9 起点。Step 18(OCR + 异步化)仍未启动,跳号继续避开冲突。
+- **已完成**:Public Chat + Widget 视觉系统升级。完整功能描述见 `HANDOFF.md` 第三节"Step 20 视觉美化交付速览",此处只记关键技术点 / 决策 / 踩坑。
+  - `app/globals.css` +6 / `components/chat/ChatWindow.tsx` +7 净增 / `app/widget.js/route.ts` +44 净增,3 文件共 +57 净增
+  - 引入 `--accent-brand: oklch(0.488 0.196 264)` Linear-style indigo 作为单一品牌强调色,B 端 `--primary` 原样保留
+- **关键技术点 / 决策**:
+  1. **token 分离 = B 端零影响的根本原因**:新 token 通过 `@theme` 映射出 `bg-accent-brand` / `text-accent-brand-fg` 工具类,与现有 `--primary` 完全独立。B 端 25+ 处用 `<Button>` 默认 variant / `buttonVariants()` 的按钮(grep 已验证)继续走 `--primary`,视觉零变化。**反例**:如果改 `--primary` 值 → 全站按钮、卡片、所有引用都跟着变,等于做了 B 端的事。详见上文 `⚠️ 强调色 token 与 unhook 规范` 第 1-2 条。
+  2. **`<Button>` default variant 的 tailwind-merge override 技巧**:base-nova 的 `Button` 用 `cn(buttonVariants({...}, className))` 组合类名,`cn()` 内部跑 `tailwind-merge`,可让实例 className 覆盖 default 的 `bg-primary text-primary-foreground`。在使用处直接写 `<Button className="bg-accent-brand text-accent-brand-fg hover:bg-accent-brand/90">`,**不动 `components/ui/button.tsx` 源码**——这是局部 unhook 强调色的标准方式,比改 button.tsx variant 干净得多。
+  3. **widget.js IIFE 里注入 `<style>` 挂 `@media query` 的模式**:widget 是动态生成的纯 JS 字符串,所有样式以前都靠 inline `cssText`。但 inline style **无法写 `@media` 媒体查询、也无法写 `::after` 伪元素**(tooltip 指针就靠伪元素)。解法:`document.createElement('style')` + `styleEl.textContent = "..."` + `document.head.appendChild(styleEl)`,把媒体查询和伪元素写进 stylesheet。规则要用 `!important` 覆盖 inline style(`#__aics_btn { right:16px !important; }`),这是 widget 场景的常态做法,可接受。未来 widget 还要加任何媒体查询 / 伪元素 / `:hover` 之外的 pseudo-class,都走这个 `<style>` 标签。
+  4. **彻底 unhook 强调色 = 连 hover 状态也要切**(踩坑):citation chip 折叠态原本是 `border-border ... hover:border-primary/30`。如果只改 active 态(`isOpen` 分支)的 `bg-primary/10 text-primary`,resting 态的 hover 仍会闪一下 `--primary` 边框,视觉上有"滑过去的瞬间冒出旧色"的残留感。规律已沉淀到 `⚠️ 强调色 token 与 unhook 规范` 第 3 条。
+  5. **Claude Design + Claude Code 协作 ROI 观察**:
+     - 三轮 design 迭代足够定稿(色板 + 关键组件示意 + 边界规则),再多就是过度打磨,落地时反而要砍——本次设计阶段三次迭代后所有改动均已落地,没有出现"design 画了但 code 砍掉"的废稿。
+     - **Claude Design 的 UI kit 是 mock,不是真实代码架构**。本次 Step 20 spec ② "Popover header bar" 在 mock 里画了一条白底 header,但真实代码里 widget.js 打开的是 iframe,iframe 内 ChatWindow 已经有自己的 header —— 落地时识别架构差异,该跳过的 spec 整条跳过,不要为了对齐 mock 而做出"双层 header 叠加"这种倒退。这一条务必传递给后续 design + code 协作的 Step。
+     - 工作流稳定形态:design 三轮 → handoff → code 分 Step A/B/C 串行落地(每步用户验收)→ smoke test(`tsc --noEmit` + `pnpm build`)→ commit → 用户手动 push → Vercel Preview → 合 main → 生产部署。
+- **验收记录**:本地 dev 三组验收(Step A 桌面端 / Step B 桌面 + 375px 移动端 / Step C smoke test)全绿;`pnpm build` 5.1s 零错零警告;bundle First Load shared 持平 102 kB;B 端 Marketing / Auth / Dashboard / Knowledge 上传页视觉零差异。详细分组验收见会话日志,不在此重复。
+- **新增遗留债 (j)**:全站品牌名不一致 —— `app/chat/[tenantId]/page.tsx:47` 用"AI 智能客服",其他页面用"AI 客服"。Step 20 在 widget.js header 决策中刻意未引入品牌名以规避此债,留作后续 5 分钟字符串替换。
+- **下一步**:由用户决定(B 端美化继续 / Step 18 OCR + 异步化触发 / 其他方向)。Step 18 触发条件不变。
 
 ---
 
