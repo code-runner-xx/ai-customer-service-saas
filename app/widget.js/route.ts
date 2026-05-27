@@ -89,7 +89,7 @@ function buildScript(appUrl: string, tenantId: string): string {
 
   var iframe = document.createElement('iframe');
   iframe.setAttribute('src', CHAT_URL);
-  iframe.setAttribute('title', 'AI 智能客服');
+  iframe.setAttribute('title', 'AI 客服');
   iframe.setAttribute('allow', 'clipboard-write');
   iframe.style.cssText = 'width:100%;height:100%;border:none;display:block;';
   frame.appendChild(iframe);

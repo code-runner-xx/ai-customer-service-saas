@@ -47,6 +47,7 @@ next-env.d.ts
 # 内部交接文档（本地保留，不入仓库）
 HANDOFF.md
 CLAUDE.md
+EXPERIENCE.md
 
 # Claude Code 本地配置（含本机绝对路径）
 .claude/settings.local.json
