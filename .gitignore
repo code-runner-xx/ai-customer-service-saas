@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.local.example
 
 # vercel
 .vercel
@@ -48,6 +49,7 @@ next-env.d.ts
 HANDOFF.md
 CLAUDE.md
 EXPERIENCE.md
+V2-PLAN.md
 
 # Claude Code 本地配置（含本机绝对路径）
 .claude/settings.local.json
