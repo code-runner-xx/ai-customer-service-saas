@@ -55,4 +55,5 @@ V2-PLAN.md
 /eval/
 
 # Claude Code 本地配置（含本机绝对路径）
-.claude/settings.local.json
+/scripts/agent/
+.claude/
