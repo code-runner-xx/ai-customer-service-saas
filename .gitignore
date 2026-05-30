@@ -51,5 +51,8 @@ CLAUDE.md
 EXPERIENCE.md
 V2-PLAN.md
 
+# V2 评估数据(本地保留,不进 git;脚本 scripts/eval/ 进 git)
+/eval/
+
 # Claude Code 本地配置（含本机绝对路径）
 .claude/settings.local.json
