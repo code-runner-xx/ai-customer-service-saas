@@ -1,11 +1,17 @@
-import { createDataStreamResponse, streamText } from 'ai';
-import { createOpenAI } from '@ai-sdk/openai';
+import { createDataStreamResponse, formatDataStreamPart } from 'ai';
 import { z } from 'zod';
-import type { CoreMessage, JSONValue } from 'ai';
+import type { JSONValue } from 'ai';
+import {
+  AIMessage,
+  AIMessageChunk,
+  HumanMessage,
+  SystemMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { retrieveContext } from '@/lib/rag/retrieve';
 import { checkRateLimit } from '@/lib/rate-limit';
+import { makeAgentGraph } from '@/lib/agent/graph';
 
 export const runtime = 'nodejs';
 // Vercel Hobby 默认 10s,流式对话偶尔长一点也更稳
@@ -37,13 +43,30 @@ interface Citation {
   similarity: number;
 }
 
-// ---------- Step 19 (b):拒答检测 ----------
+// ---------- 拒答检测(Step 23.3c 启用拒答清洗时调用,本步红线保留定义)----------
 // System prompt 原话:"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。"
 // 取两串高辨识度片段做 AND 匹配:容忍 LLM 微改标点/缺字,也避免真实答案里偶尔出现单串被误伤。
 // 命中 → citations 置空,DB 和前端 data part 同步不渲染引用 chip。
 const REFUSAL_MARKERS = ['没有找到相关信息', '联系人工客服'];
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function isRefusalText(text: string): boolean {
   return REFUSAL_MARKERS.every((m) => text.includes(m));
+}
+
+// ---------- V2 Agent system prompt ----------
+// 拒答原句严格沿用 V1 措辞,含 REFUSAL_MARKERS 两词,保证 Step 23.3c 接拒答清洗时
+// isRefusalText 双标记 AND 匹配能命中。
+const SYSTEM_PROMPT = `你是企业专属客服助手。
+
+工作方式:
+1. 当用户问题需要查阅企业知识库时,调用 search_knowledge_base 工具检索相关信息。
+2. 严格依据检索到的内容回答,禁止编造知识库以外的信息。
+3. 回答末尾以 [来源 N] 标注引用编号(N 对应检索结果中的 [来源 N])。
+4. 如果检索结果与问题无关或为空,回答"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。"——禁止用其他措辞。
+5. 用中文、简洁、分点作答。`;
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 // ---------- POST handler ----------
@@ -90,7 +113,9 @@ export async function POST(request: Request) {
     }
   }
 
-  // 3. 取最后一条 user 消息作为检索 query
+  // 3. 取最后一条 user 消息作为 query
+  // V1 用 query 喂同步 retrieveContext;V2 Agent 自己从 messages 历史决定检索什么 query。
+  // 这里 query 仅用于 chat_messages.user.content 写库(记录用户原句,无关 Agent 内部 query 改写)。
   const rawMessages = messages as Array<{ role: string; content: unknown }>;
   const lastUserMsg = [...rawMessages]
     .reverse()
@@ -101,37 +126,7 @@ export async function POST(request: Request) {
   }
   const query = lastUserMsg.content.trim();
 
-  // 4. 向量检索
-  const { chunks, contextText } = await retrieveContext(query, tenantId, 5);
-
-  // 5. 构造 citations
-  const citations: Citation[] = chunks.map((c, i) => ({
-    index: i + 1,
-    chunkId: c.chunkId,
-    documentId: c.documentId,
-    documentTitle: c.documentTitle,
-    content: c.content,
-    similarity: c.similarity,
-  }));
-
-  // 6. System prompt
-  const systemPrompt = `你是企业专属客服助手。严格依据下方【知识上下文】回答用户问题。
-规则:
-1. 若上下文中没有相关信息,回答"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。",禁止编造。
-2. 回答末尾以 [来源 N] 标注引用编号。
-3. 用中文、简洁、分点作答。
-
-【知识上下文】
-${contextText}`;
-
-  // 7. SiliconFlow DeepSeek-V3 模型
-  const siliconflow = createOpenAI({
-    apiKey: process.env.SILICONFLOW_API_KEY!,
-    baseURL: process.env.SILICONFLOW_BASE_URL!,
-  });
-  const model = siliconflow('deepseek-ai/DeepSeek-V3');
-
-  // 8. 建 session(若无)
+  // 4. 建 session(若无)
   const admin = createAdminClient();
   let sid = sessionId;
   if (!sid) {
@@ -151,56 +146,82 @@ ${contextText}`;
     sid = sessionData.id as string;
   }
 
-  // finalSid 供 onFinish 闭包使用(TypeScript 确认非 undefined)
+  // finalSid 供 execute 闭包使用(TypeScript 确认非 undefined)
   const finalSid = sid;
 
-  // 9. 流式响应
+  // 5. 构造 V2 Agent graph(tenantId 闭包注入工具,LLM 不可见)
+  const graph = makeAgentGraph(tenantId);
+
+  // 6. 把 ai-sdk 风格 messages 转 LangChain BaseMessage,顶部 prepend SystemMessage
+  const langchainMessages: BaseMessage[] = [new SystemMessage(SYSTEM_PROMPT)];
+  for (const m of rawMessages) {
+    const content =
+      typeof m.content === 'string' ? m.content : String(m.content ?? '');
+    if (m.role === 'assistant') {
+      langchainMessages.push(new AIMessage(content));
+    } else {
+      // V1 客户端 useChat 只发 user / assistant;其他 role 兜底为 HumanMessage
+      langchainMessages.push(new HumanMessage(content));
+    }
+  }
+
+  // 7. 流式响应:LangGraph → ai-sdk v4 dataStream 桥接(Step 23.3-spike 锁定写法)
   return createDataStreamResponse({
     execute: async (dataStream) => {
-      // 先把 sessionId 推给前端
-      dataStream.writeData({ type: 'session', sessionId: finalSid } as unknown as JSONValue);
+      // 先把 sessionId 推给前端(useChat experimental_prepareRequestBody 从 data part 抓取)
+      dataStream.writeData({
+        type: 'session',
+        sessionId: finalSid,
+      } as unknown as JSONValue);
 
-      // Step 19 (b):finalCitations 由 onFinish 的拒答判定改写,DB insert + writeData 共用同一变量,
-      // 保证数据库记录 / 前端 data part 两处 citations 一致(后端闭环,前端 / 历史恢复都不会再渲染空 chip)。
-      // AI SDK v4 guarantees:onFinish 在 result.text 解析前 await 完成,此处读取 finalCitations 安全。
-      let finalCitations: Citation[] = citations;
+      let fullText = '';
+      for await (const chunk of await graph.stream(
+        { messages: langchainMessages },
+        { streamMode: 'messages' },
+      )) {
+        if (!Array.isArray(chunk) || chunk.length < 2) continue;
+        const [msg, metadata] = chunk;
+        // spike 坑 3 心法:agent 节点 + content 非空 = 最终回答 token
+        // 自动排除:tools 节点输出、step=1 的 tool_call 增量流(content 全空)
+        const node = isRecord(metadata) ? metadata.langgraph_node : undefined;
+        if (node !== 'agent') continue;
+        if (!(msg instanceof AIMessageChunk)) continue;
+        const text = typeof msg.content === 'string' ? msg.content : '';
+        if (!text) continue;
+        fullText += text;
+        // 23.3b 桥接关键一行(spike 验证 v4 协议 prefix 0: text)
+        dataStream.write(formatDataStreamPart('text', text));
+      }
 
-      const result = streamText({
-        model,
-        system: systemPrompt,
-        messages: messages as unknown as CoreMessage[],
-        onFinish: async ({ text }) => {
-          if (isRefusalText(text)) {
-            finalCitations = [];
-          }
-          // 写库失败不影响已流给用户的响应
-          try {
-            await admin.from('chat_messages').insert([
-              {
-                session_id: finalSid,
-                role: 'user',
-                content: query,
-                citations: [],
-              },
-              {
-                session_id: finalSid,
-                role: 'assistant',
-                content: text,
-                citations: finalCitations,
-              },
-            ]);
-          } catch (e) {
-            console.error('[chat] onFinish 写库失败(忽略,不影响响应):', e);
-          }
-        },
-      });
+      // 流结束后写库(位置 A:graph stream 循环外)
+      // ⚠️ citations 字段 Step 23.3c 接路线 3 闭包 collector,本步占位空数组
+      //    (Supabase schema:chat_messages.citations jsonb default '[]')
+      // 写库失败仅 console.error 不抛(主题 4.2),流响应已经发给用户
+      try {
+        await admin.from('chat_messages').insert([
+          {
+            session_id: finalSid,
+            role: 'user',
+            content: query,
+            citations: [],
+          },
+          {
+            session_id: finalSid,
+            role: 'assistant',
+            content: fullText,
+            citations: [],
+          },
+        ]);
+      } catch (e) {
+        console.error('[chat] 写库失败(忽略,不影响响应):', e);
+      }
 
-      // 把 LLM 流合并进 dataStream
-      result.mergeIntoDataStream(dataStream);
-
-      // 等 LLM 全部生成完毕(onFinish 已 await 完成),再把 finalCitations 推给前端
-      await result.text;
-      dataStream.writeData({ type: 'citations', citations: finalCitations } as unknown as JSONValue);
+      // 23.3c 这里接 citations writeData(路线 3 闭包 collector + 拒答清洗);
+      // 本步占位空数组,保前端 useChat 的 data part 契约一致
+      dataStream.writeData({
+        type: 'citations',
+        citations: [] as Citation[],
+      } as unknown as JSONValue);
     },
     onError: (err) => {
       console.error('[chat] stream error:', err);
