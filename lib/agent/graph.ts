@@ -1,4 +1,5 @@
 // V2 Step 23.3b — LangGraph Agent 状态图(生产)
+// V2 Step 23.3c — collector 透传(路径 β),返回 { graph, collector }
 //
 // 不自带 server-only,对齐 lib/agent/tools.ts 范式:依赖链单向传染
 // (tools.ts → lib/rag/embed + lib/supabase/admin → server-only),
@@ -24,12 +25,21 @@ import {
 import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, AIMessageChunk } from '@langchain/core/messages';
-import { makeSearchKnowledgeBaseTool } from './tools';
+import {
+  makeSearchKnowledgeBaseTool,
+  type CollectedChunk,
+} from './tools';
 
 /**
  * 创建一个绑定了 tenantId 的 Agent 状态图。
  *
+ * Step 23.3c 路径 β:内部 new collector 数组,通过工厂闭包注入工具;
+ * 调用方(route.ts)拿到 { graph, collector } 后只在流跑完读 collector 聚合,
+ * 不关心 collector 的创建/注入细节。
+ *
  * @param tenantId  租户 ID,通过工厂闭包注入 search_knowledge_base 工具,LLM 不可见。
+ * @returns { graph, collector } —— collector 在 graph 整个生命周期内被工具内部 push,
+ *          单次请求一份,无跨请求污染。
  */
 export function makeAgentGraph(tenantId: string) {
   const apiKey = process.env.SILICONFLOW_API_KEY;
@@ -37,7 +47,9 @@ export function makeAgentGraph(tenantId: string) {
   if (!apiKey) throw new Error('缺少环境变量 SILICONFLOW_API_KEY');
   if (!baseURL) throw new Error('缺少环境变量 SILICONFLOW_BASE_URL');
 
-  const tools = [makeSearchKnowledgeBaseTool(tenantId)];
+  // Step 23.3c:单次请求专属 collector,工具内闭包捕获 push,route.ts 流跑完读
+  const collector: CollectedChunk[] = [];
+  const tools = [makeSearchKnowledgeBaseTool(tenantId, collector)];
 
   // 坑 1:绝不设 streaming: true
   const llm = new ChatOpenAI({
@@ -73,11 +85,13 @@ export function makeAgentGraph(tenantId: string) {
     return END;
   }
 
-  return new StateGraph(MessagesAnnotation)
+  const graph = new StateGraph(MessagesAnnotation)
     .addNode('agent', callModel)
     .addNode('tools', new ToolNode(tools))
     .addEdge(START, 'agent')
     .addConditionalEdges('agent', shouldContinue)
     .addEdge('tools', 'agent')
     .compile();
+
+  return { graph, collector };
 }

@@ -12,6 +12,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { makeAgentGraph } from '@/lib/agent/graph';
+import type { CollectedChunk } from '@/lib/agent/tools';
 
 export const runtime = 'nodejs';
 // Vercel Hobby 默认 10s,流式对话偶尔长一点也更稳
@@ -43,12 +44,12 @@ interface Citation {
   similarity: number;
 }
 
-// ---------- 拒答检测(Step 23.3c 启用拒答清洗时调用,本步红线保留定义)----------
+// ---------- 拒答检测(Step 23.3c 启用)----------
 // System prompt 原话:"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。"
 // 取两串高辨识度片段做 AND 匹配:容忍 LLM 微改标点/缺字,也避免真实答案里偶尔出现单串被误伤。
-// 命中 → citations 置空,DB 和前端 data part 同步不渲染引用 chip。
+// 命中 → finalCitations 置空,DB 和前端 data part 同步不渲染引用 chip;
+// 天然覆盖"Agent 调了检索、collector 非空、但模型输出拒答文本"的 case。
 const REFUSAL_MARKERS = ['没有找到相关信息', '联系人工客服'];
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function isRefusalText(text: string): boolean {
   return REFUSAL_MARKERS.every((m) => text.includes(m));
 }
@@ -150,7 +151,9 @@ export async function POST(request: Request) {
   const finalSid = sid;
 
   // 5. 构造 V2 Agent graph(tenantId 闭包注入工具,LLM 不可见)
-  const graph = makeAgentGraph(tenantId);
+  //    Step 23.3c 路径 β:graph 内部 new collector,工具闭包 push,
+  //    route.ts 流跑完读 collector 做"去重 + 重编号 + 拒答清洗"
+  const { graph, collector } = makeAgentGraph(tenantId);
 
   // 6. 把 ai-sdk 风格 messages 转 LangChain BaseMessage,顶部 prepend SystemMessage
   const langchainMessages: BaseMessage[] = [new SystemMessage(SYSTEM_PROMPT)];
@@ -193,9 +196,36 @@ export async function POST(request: Request) {
         dataStream.write(formatDataStreamPart('text', text));
       }
 
+      // Step 23.3c:聚合 collector → 去重 → 重编号 → Citation[]
+      // 选项 A(已拍板):collector 用 chunkId 去重后按收集顺序统一编号 1..N。
+      // 工具文本里的 [来源 N] 不参与编号(职责分离:工具主返回归 LLM,副产物归 collector)。
+      // 已知接受瑕疵:多轮工具调用时 LLM 文本里 [来源 N] 可能与前端 chip 编号对不上,
+      // 单轮 99% 完全对齐;不为多轮严格对齐引入 collector 全局递增编号那套复杂机制。
+      const seen = new Set<string>();
+      const uniqueChunks: CollectedChunk[] = [];
+      for (const c of collector) {
+        if (seen.has(c.chunkId)) continue;
+        seen.add(c.chunkId);
+        uniqueChunks.push(c);
+      }
+      const aggregatedCitations: Citation[] = uniqueChunks.map((c, i) => ({
+        index: i + 1,
+        chunkId: c.chunkId,
+        documentId: c.documentId,
+        documentTitle: c.documentTitle,
+        content: c.content,
+        similarity: c.similarity,
+      }));
+
+      // Step 23.3c 拒答清洗:双标记 AND 命中 → 置空
+      // 覆盖"Agent 调了检索、collector 非空、但模型输出拒答"的 case(主题 7.2)
+      let finalCitations: Citation[] = aggregatedCitations;
+      if (isRefusalText(fullText)) {
+        finalCitations = [];
+      }
+
       // 流结束后写库(位置 A:graph stream 循环外)
-      // ⚠️ citations 字段 Step 23.3c 接路线 3 闭包 collector,本步占位空数组
-      //    (Supabase schema:chat_messages.citations jsonb default '[]')
+      // assistant 行用 finalCitations(可能空可能全量),user 行 V1 约定固定 [](无引用)
       // 写库失败仅 console.error 不抛(主题 4.2),流响应已经发给用户
       try {
         await admin.from('chat_messages').insert([
@@ -209,18 +239,18 @@ export async function POST(request: Request) {
             session_id: finalSid,
             role: 'assistant',
             content: fullText,
-            citations: [],
+            citations: finalCitations,
           },
         ]);
       } catch (e) {
         console.error('[chat] 写库失败(忽略,不影响响应):', e);
       }
 
-      // 23.3c 这里接 citations writeData(路线 3 闭包 collector + 拒答清洗);
-      // 本步占位空数组,保前端 useChat 的 data part 契约一致
+      // 推流 citations:DB 与前端 data part 同源(同一个 finalCitations)
+      // ChatWindow.tsx:282 latestCitations 从 data parts 抓 type='citations' 渲染 chip
       dataStream.writeData({
         type: 'citations',
-        citations: [] as Citation[],
+        citations: finalCitations,
       } as unknown as JSONValue);
     },
     onError: (err) => {
