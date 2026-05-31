@@ -27,6 +27,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, AIMessageChunk } from '@langchain/core/messages';
 import {
   makeSearchKnowledgeBaseTool,
+  makeListDocumentsTool,
   type CollectedChunk,
 } from './tools';
 
@@ -49,7 +50,11 @@ export function makeAgentGraph(tenantId: string) {
 
   // Step 23.3c:单次请求专属 collector,工具内闭包捕获 push,route.ts 流跑完读
   const collector: CollectedChunk[] = [];
-  const tools = [makeSearchKnowledgeBaseTool(tenantId, collector)];
+  // Step 24.1:list_documents 纯读、无副产物,不接 collector,与 search 复用同一个 ToolNode
+  const tools = [
+    makeSearchKnowledgeBaseTool(tenantId, collector),
+    makeListDocumentsTool(tenantId),
+  ];
 
   // 坑 1:绝不设 streaming: true
   const llm = new ChatOpenAI({

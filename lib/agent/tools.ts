@@ -128,3 +128,60 @@ export function makeSearchKnowledgeBaseTool(
     },
   );
 }
+
+// ---------- Step 24.1 list_documents 工具 ----------
+// 与 makeSearchKnowledgeBaseTool 同构:tenantId 闭包注入、schema 不暴露 tenantId(LLM 不可见)。
+// 纯读、无副产物,不接 collector(不污染 citations 通道,citations 仅来源于 search_knowledge_base)。
+// 用途:Agent 回答"知识库有哪些文档"这类元问题。
+
+interface DocumentRow {
+  id: string;
+  title: string;
+  status: string;
+  chunk_count: number | null;
+}
+
+function statusToChinese(status: string): string {
+  if (status === 'processing') return '处理中';
+  if (status === 'ready') return '就绪';
+  if (status === 'failed') return '失败';
+  return status;
+}
+
+export function makeListDocumentsTool(tenantId: string) {
+  return tool(
+    async (): Promise<string> => {
+      const admin = createAdminClient();
+      // ⚠️ 铁律 3 + EXPERIENCE 主题 6/16.2:admin client 必须显式 .eq('user_id', tenantId)
+      //    漏了即跨租户泄漏(C 端匿名同样走这条 admin 路径)
+      const { data, error } = await admin
+        .from('documents')
+        .select('id, title, status, chunk_count')
+        .eq('user_id', tenantId)
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        throw new Error(`查询文档列表失败:${error.message}`);
+      }
+
+      const rows = (data ?? []) as DocumentRow[];
+      if (rows.length === 0) {
+        return '当前知识库暂无文档。';
+      }
+
+      // 主返回字符串(主题 16.1:工具主返回服务 LLM,不用结构化 JSON)
+      return rows
+        .map(
+          (r) =>
+            `「${r.title}」— ${statusToChinese(r.status)} — ${r.chunk_count ?? 0} 块`,
+        )
+        .join('\n');
+    },
+    {
+      name: 'list_documents',
+      description:
+        '列出当前租户知识库内所有文档的标题、处理状态与块数。当用户询问"知识库有哪些文档/你都知道什么内容/有什么资料/文档清单"等元信息时调用;不要用于回答具体业务问题。',
+      schema: z.object({}),
+    },
+  );
+}
