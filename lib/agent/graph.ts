@@ -28,21 +28,29 @@ import { AIMessage, AIMessageChunk } from '@langchain/core/messages';
 import {
   makeSearchKnowledgeBaseTool,
   makeListDocumentsTool,
+  makeEscalateToHumanTool,
   type CollectedChunk,
 } from './tools';
 
 /**
- * 创建一个绑定了 tenantId 的 Agent 状态图。
+ * 创建一个绑定了 tenantId / sessionId 的 Agent 状态图。
  *
  * Step 23.3c 路径 β:内部 new collector 数组,通过工厂闭包注入工具;
  * 调用方(route.ts)拿到 { graph, collector } 后只在流跑完读 collector 聚合,
  * 不关心 collector 的创建/注入细节。
  *
- * @param tenantId  租户 ID,通过工厂闭包注入 search_knowledge_base 工具,LLM 不可见。
+ * Step 24.2:新增 sessionId 参数,透传给 escalate_to_human 工具用于
+ * 在 chat_messages 写一条 role='system' 的 ESCALATION 记录。chat_messages
+ * 无 user_id 列(主题 6.2),隔离只能靠 sessionId 间接做,因此该 sessionId
+ * 必须由 route.ts 已建立/已校验后传入,绝不能让 LLM 通过工具参数传。
+ * escalate 的写库与 collector / finalCitations 通道完全独立,23.3c 红线零交集。
+ *
+ * @param tenantId  租户 ID,通过工厂闭包注入工具(search/list/escalate),LLM 不可见。
+ * @param sessionId 当前对话 session ID,通过工厂闭包注入 escalate_to_human,LLM 不可见。
  * @returns { graph, collector } —— collector 在 graph 整个生命周期内被工具内部 push,
  *          单次请求一份,无跨请求污染。
  */
-export function makeAgentGraph(tenantId: string) {
+export function makeAgentGraph(tenantId: string, sessionId: string) {
   const apiKey = process.env.SILICONFLOW_API_KEY;
   const baseURL = process.env.SILICONFLOW_BASE_URL;
   if (!apiKey) throw new Error('缺少环境变量 SILICONFLOW_API_KEY');
@@ -51,9 +59,11 @@ export function makeAgentGraph(tenantId: string) {
   // Step 23.3c:单次请求专属 collector,工具内闭包捕获 push,route.ts 流跑完读
   const collector: CollectedChunk[] = [];
   // Step 24.1:list_documents 纯读、无副产物,不接 collector,与 search 复用同一个 ToolNode
+  // Step 24.2:escalate_to_human 写库副作用与 collector 完全独立(23.3c 红线零交集)
   const tools = [
     makeSearchKnowledgeBaseTool(tenantId, collector),
     makeListDocumentsTool(tenantId),
+    makeEscalateToHumanTool(tenantId, sessionId),
   ];
 
   // 坑 1:绝不设 streaming: true

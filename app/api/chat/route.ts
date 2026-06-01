@@ -62,18 +62,23 @@ const SYSTEM_PROMPT = `你是企业专属客服助手。
 可用工具:
 - search_knowledge_base(query):检索知识库片段,用于回答"具体业务内容"问题(如使用方法、参数细节、故障处理、政策条款等)。
 - list_documents():列出知识库现有文档的标题、状态、块数,用于回答"知识库元信息"问题(如"有哪些文档/你都知道什么内容/有什么资料/文档清单")。
+- escalate_to_human(reason):用户明确要求转人工 / 投诉抱怨 / 多轮无法解决时调用,记录转人工请求并返回标准化文案。
 
 工具选择规则:
 - 元信息问题用 list_documents,具体内容问题用 search_knowledge_base。
 - 不要为元问题去 search,也不要为内容问题去 list。
 - 若两类信息都需要(如"先告诉我有什么文档,再讲第二份文档讲了什么"),可以先调 list_documents 再调 search_knowledge_base。
+- 用户**明确**说"转人工 / 找真人客服 / 投诉 / 我要找你们经理"等 → 立即调 escalate_to_human。
+- 同一问题连续 ≥2 轮 search 仍未解决、用户明显不满意或抱怨 → 调 escalate_to_human。
+- ⚠️ 单次知识库找不到答案按工作方式第 4 条的话术回答,**不要**直接 escalate —— 知识库找不到 ≠ 转人工,只有"用户主动要转人工"或"多轮+不满"才 escalate。
 
 工作方式:
 1. 判断问题类型后调用对应工具(规则见上);需要查知识库的问题禁止凭空回答。
 2. 严格依据工具返回的内容作答,禁止编造工具结果以外的信息。
 3. 仅当使用 search_knowledge_base 的检索片段作答时,回答末尾以 [来源 N] 标注引用编号(N 对应检索结果中的 [来源 N]);list_documents 返回的是元信息列表,无需 [来源 N]。
 4. 如果 search_knowledge_base 检索结果与问题无关或为空,回答"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。"——禁止用其他措辞。
-5. 用中文、简洁、分点作答。`;
+5. 调用 escalate_to_human 后,直接使用工具返回的文案回答用户,不要叠加 [来源 N]、不要改写措辞。
+6. 用中文、简洁、分点作答。`;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -159,10 +164,13 @@ export async function POST(request: Request) {
   // finalSid 供 execute 闭包使用(TypeScript 确认非 undefined)
   const finalSid = sid;
 
-  // 5. 构造 V2 Agent graph(tenantId 闭包注入工具,LLM 不可见)
+  // 5. 构造 V2 Agent graph(tenantId/sessionId 闭包注入工具,LLM 不可见)
   //    Step 23.3c 路径 β:graph 内部 new collector,工具闭包 push,
   //    route.ts 流跑完读 collector 做"去重 + 重编号 + 拒答清洗"
-  const { graph, collector } = makeAgentGraph(tenantId);
+  //    Step 24.2:finalSid 透传给 escalate_to_human 用于写 role='system' 的
+  //    ESCALATION 记录。chat_messages 无 user_id 列(主题 6.2),隔离只能靠
+  //    sessionId 间接做,所以这里必须传 route.ts 已校验的 finalSid(LLM 不可见)。
+  const { graph, collector } = makeAgentGraph(tenantId, finalSid);
 
   // 6. 把 ai-sdk 风格 messages 转 LangChain BaseMessage,顶部 prepend SystemMessage
   const langchainMessages: BaseMessage[] = [new SystemMessage(SYSTEM_PROMPT)];

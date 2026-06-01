@@ -185,3 +185,73 @@ export function makeListDocumentsTool(tenantId: string) {
     },
   );
 }
+
+// ---------- Step 24.2 escalate_to_human 工具 ----------
+// 与 search/list 同构:tenantId/sessionId 闭包注入,schema 只暴露 { reason }(LLM 不可见 ids)。
+// 用途:用户明确要求转人工 / 投诉抱怨 / 多轮答不好时记录转人工意图。
+//
+// 隔离设计(铁律 3 + EXPERIENCE 主题 6.2):
+// - chat_messages 没有 user_id 列,隔离 100% 靠 sessionId 间接做。
+// - sessionId 必须是 route.ts 已建立/已校验的 finalSid(在 chat_sessions 层与 tenantId 强绑)。
+// - 绝不能让 LLM 通过参数传 sessionId —— 它幻觉一个 session_id 即跨租户写。
+// - tenantId 当前不参与 SQL 过滤,仅用于失败日志携带租户上下文 / 未来扩展(若后续 escalate
+//   需要写带 user_id 的新表则备好);保留它对齐主题 16.1 工厂闭包范式。
+//
+// 与 23.3c citations 通道的关系(动手约束 B):
+// - escalate 的这条 admin insert 是独立的 role='system' chat_messages 记录,
+//   与 route.ts onFinish 写 assistant 消息的那条是两条不同 insert。
+// - 完全不读 / 不写 / 不触碰 collector、不影响 finalCitations 聚合。
+// - 23.3c 红线(collector 通道 + 拒答清洗)与本工具零交集。
+//
+// 容错策略(主题 4.2):
+// - 写库失败仅 console.error 不抛 —— 转人工是用户感知操作,运营侧丢一条记录可接受,
+//   用户不能看到"转人工失败"会更焦虑。无论写库成败都返回同一句成功文案给 LLM。
+//
+// content 列规范(动手约束 A):
+// - 纯 `ESCALATION: ${reason}`,不拼 visitor_id / timestamp / 其他上下文。
+// - 可追溯信息靠 created_at + join chat_sessions 拿,不冗余进 text 列。
+
+export function makeEscalateToHumanTool(
+  tenantId: string,
+  sessionId: string,
+) {
+  return tool(
+    async ({ reason }: { reason: string }): Promise<string> => {
+      const admin = createAdminClient();
+      try {
+        // 独立 insert:与 route.ts onFinish 写 assistant 消息那条完全独立,
+        // 不读不写 collector / finalCitations(动手约束 B)
+        await admin.from('chat_messages').insert({
+          session_id: sessionId,
+          role: 'system',
+          content: `ESCALATION: ${reason.trim().slice(0, 500)}`,
+          citations: [],
+        });
+      } catch (err) {
+        // 主题 4.2:副作用失败不阻断、不抛、不让用户看到运营侧失败
+        // tenantId 仅用于失败日志携带租户上下文(SQL 过滤靠 sessionId)
+        console.error('[tool/escalate] 写库失败(忽略):', {
+          tenantId,
+          sessionId,
+          err,
+        });
+      }
+      // 不论写库成败,LLM 都拿到同一句成功文案
+      return '已为您记录转人工请求,工作人员会尽快与您联系。';
+    },
+    {
+      name: 'escalate_to_human',
+      description:
+        '当用户明确要求转人工 / 投诉抱怨 / 多轮无法解决问题时调用,记录转人工请求并返回标准化文案。',
+      schema: z.object({
+        reason: z
+          .string()
+          .min(1, 'reason 不能为空')
+          .max(500)
+          .describe(
+            '用中文简明描述触发转人工的原因(如「用户多次询问退款问题未得解决」)',
+          ),
+      }),
+    },
+  );
+}
