@@ -8,6 +8,7 @@ import {
   SystemMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
+import { GraphRecursionError } from '@langchain/langgraph';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { checkRateLimit } from '@/lib/rate-limit';
@@ -199,23 +200,65 @@ export async function POST(request: Request) {
         sessionId: finalSid,
       } as unknown as JSONValue);
 
+      // Step 25.1b 层 3 准备:wall-clock 50s 超时 + signal 透传给 graph.stream
+      // - 50s < Vercel maxDuration 60s(主题 8.2),留 10s 给 collector 聚合 + 拒答清洗
+      //   + 写库 + 推 citations 收尾;finally clearTimeout 防泄漏
+      // - 25.1a-spike T2 实证:graph.stream(input, config) 的 config 认 signal 字段,
+      //   abort 后 for-await-of 抛 DOMException(name='AbortError')
+      // - recursionLimit:10 兜底失控循环(25.1a-spike T1 实证:超限抛 GraphRecursionError,
+      //   lc_error_code='GRAPH_RECURSION_LIMIT',minify-safe)
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => abortController.abort(), 50_000);
+
       let fullText = '';
-      for await (const chunk of await graph.stream(
-        { messages: langchainMessages },
-        { streamMode: 'messages' },
-      )) {
-        if (!Array.isArray(chunk) || chunk.length < 2) continue;
-        const [msg, metadata] = chunk;
-        // spike 坑 3 心法:agent 节点 + content 非空 = 最终回答 token
-        // 自动排除:tools 节点输出、step=1 的 tool_call 增量流(content 全空)
-        const node = isRecord(metadata) ? metadata.langgraph_node : undefined;
-        if (node !== 'agent') continue;
-        if (!(msg instanceof AIMessageChunk)) continue;
-        const text = typeof msg.content === 'string' ? msg.content : '';
-        if (!text) continue;
-        fullText += text;
-        // 23.3b 桥接关键一行(spike 验证 v4 协议 prefix 0: text)
-        dataStream.write(formatDataStreamPart('text', text));
+      try {
+        for await (const chunk of await graph.stream(
+          { messages: langchainMessages },
+          {
+            streamMode: 'messages',
+            recursionLimit: 10,
+            signal: abortController.signal,
+          },
+        )) {
+          if (!Array.isArray(chunk) || chunk.length < 2) continue;
+          const [msg, metadata] = chunk;
+          // spike 坑 3 心法:agent 节点 + content 非空 = 最终回答 token
+          // 自动排除:tools 节点输出、step=1 的 tool_call 增量流(content 全空)
+          const node = isRecord(metadata) ? metadata.langgraph_node : undefined;
+          if (node !== 'agent') continue;
+          if (!(msg instanceof AIMessageChunk)) continue;
+          const text = typeof msg.content === 'string' ? msg.content : '';
+          if (!text) continue;
+          fullText += text;
+          // 23.3b 桥接关键一行(spike 验证 v4 协议 prefix 0: text)
+          dataStream.write(formatDataStreamPart('text', text));
+        }
+      } catch (err: unknown) {
+        // Step 25.1b 层 3:图级错误兜底——recursionLimit 超限 / abort 超时 / 其他
+        // - 工具内异常已由层 1(tools.ts try/catch)+ 层 2(ToolNode handleToolErrors)
+        //   接住,不会冒到这里;这里专接图级错误
+        // - 降级文本经 dataStream.write 直推前端(不经 LLM 二次生成,避免二次失败)
+        // - fullText 续接(决策①):已流 token + fallback,DB 与前端 UX 一致
+        // - 三句 fallback 均不含 REFUSAL_MARKERS 任一标记(决策③),不触发拒答清洗
+        console.error('[chat] graph 异常:', err);
+        const lcErrCode = (err as { lc_error_code?: string })?.lc_error_code;
+        const errName = (err as { name?: string })?.name;
+
+        let fallback: string;
+        if (
+          err instanceof GraphRecursionError ||
+          lcErrCode === 'GRAPH_RECURSION_LIMIT'
+        ) {
+          fallback = '\n\n[系统] 工具调用次数过多,请简化您的问题或重新表达。';
+        } else if (errName === 'AbortError') {
+          fallback = '\n\n[系统] 对话超时,请简化您的问题或稍后再试。';
+        } else {
+          fallback = '\n\n[系统] 暂时无法生成回答,请稍后再试。';
+        }
+        dataStream.write(formatDataStreamPart('text', fallback));
+        fullText += fallback;
+      } finally {
+        clearTimeout(timeoutId);
       }
 
       // Step 23.3c:聚合 collector → 去重 → 重编号 → Citation[]

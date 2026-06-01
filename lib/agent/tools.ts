@@ -62,61 +62,72 @@ export function makeSearchKnowledgeBaseTool(
 ) {
   return tool(
     async ({ query }: { query: string }): Promise<string> => {
-      const vectors = await embedTexts([query]);
-      const queryEmbedding = vectors[0];
+      // Step 25.1b 层 1:工具体外层 try/catch 控降级文案质量
+      // - 不是为了防 500(ToolNode handleToolErrors:true 已防,25.1a-spike T3 实证)
+      // - 而是避免 LLM 看到英文 Error 提示后生成不可控话术 / 浪费 recursionLimit 重试
+      // - 内部 embed/RPC/documents 查询/collector push 实现一字不动,只加容错壳
+      // - 降级串不含 REFUSAL_MARKERS 任一标记(没有找到相关信息 / 联系人工客服),
+      //   避免被 isRefusalText 双标记 AND 匹配误清洗(主题 7.2)
+      try {
+        const vectors = await embedTexts([query]);
+        const queryEmbedding = vectors[0];
 
-      const admin = createAdminClient();
-      const { data, error } = await admin.rpc('match_document_chunks', {
-        query_embedding: queryEmbedding,
-        tenant_id: tenantId,
-        match_count: TOP_K,
-        min_similarity: MIN_SIMILARITY,
-      });
-
-      if (error) {
-        throw new Error(`向量检索失败:${error.message}`);
-      }
-
-      const rows = (data ?? []) as RpcRow[];
-      if (rows.length === 0) {
-        return '知识库中未找到与该问题相关的内容。';
-      }
-
-      // Step 23.3c:回填 documentTitle(RPC 不返,复刻 lib/rag/retrieve.ts 第二步)
-      // ⚠️ 铁律 3 + EXPERIENCE 主题 6:admin client 显式 .eq('user_id', tenantId)
-      //    不能漏,漏了即跨租户泄漏(C 端匿名调用同样走这条 admin 路径)
-      const docIds = [...new Set(rows.map((r) => r.document_id))];
-      const { data: docs, error: docErr } = await admin
-        .from('documents')
-        .select('id, title')
-        .in('id', docIds)
-        .eq('user_id', tenantId);
-
-      if (docErr) {
-        throw new Error(`查询文档标题失败:${docErr.message}`);
-      }
-
-      const titleMap = new Map(
-        (docs ?? []).map((d: { id: string; title: string }) => [
-          d.id,
-          d.title,
-        ]),
-      );
-
-      // Step 23.3c 副产物:结构化字段 push 进 collector(LLM 不可见)
-      // 多轮工具调用时同一 chunkId 可能被多次 push,去重责任在 route.ts 聚合时统一做
-      for (const r of rows) {
-        collector.push({
-          chunkId: r.id,
-          documentId: r.document_id,
-          documentTitle: titleMap.get(r.document_id) ?? '未知文档',
-          content: r.content,
-          similarity: r.similarity,
+        const admin = createAdminClient();
+        const { data, error } = await admin.rpc('match_document_chunks', {
+          query_embedding: queryEmbedding,
+          tenant_id: tenantId,
+          match_count: TOP_K,
+          min_similarity: MIN_SIMILARITY,
         });
-      }
 
-      // 工具 return 与 23.2 完全一致(LLM 看到的契约字节级不变)
-      return rows.map((r, i) => `[来源 ${i + 1}] ${r.content}`).join('\n\n');
+        if (error) {
+          throw new Error(`向量检索失败:${error.message}`);
+        }
+
+        const rows = (data ?? []) as RpcRow[];
+        if (rows.length === 0) {
+          return '知识库中未找到与该问题相关的内容。';
+        }
+
+        // Step 23.3c:回填 documentTitle(RPC 不返,复刻 lib/rag/retrieve.ts 第二步)
+        // ⚠️ 铁律 3 + EXPERIENCE 主题 6:admin client 显式 .eq('user_id', tenantId)
+        //    不能漏,漏了即跨租户泄漏(C 端匿名调用同样走这条 admin 路径)
+        const docIds = [...new Set(rows.map((r) => r.document_id))];
+        const { data: docs, error: docErr } = await admin
+          .from('documents')
+          .select('id, title')
+          .in('id', docIds)
+          .eq('user_id', tenantId);
+
+        if (docErr) {
+          throw new Error(`查询文档标题失败:${docErr.message}`);
+        }
+
+        const titleMap = new Map(
+          (docs ?? []).map((d: { id: string; title: string }) => [
+            d.id,
+            d.title,
+          ]),
+        );
+
+        // Step 23.3c 副产物:结构化字段 push 进 collector(LLM 不可见)
+        // 多轮工具调用时同一 chunkId 可能被多次 push,去重责任在 route.ts 聚合时统一做
+        for (const r of rows) {
+          collector.push({
+            chunkId: r.id,
+            documentId: r.document_id,
+            documentTitle: titleMap.get(r.document_id) ?? '未知文档',
+            content: r.content,
+            similarity: r.similarity,
+          });
+        }
+
+        // 工具 return 与 23.2 完全一致(LLM 看到的契约字节级不变)
+        return rows.map((r, i) => `[来源 ${i + 1}] ${r.content}`).join('\n\n');
+      } catch (err: unknown) {
+        console.error('[tool/search] 失败(降级):', { tenantId, query, err });
+        return '当前知识库检索暂时不可用,请稍后再试或换个表达方式。';
+      }
     },
     {
       name: 'search_knowledge_base',
@@ -151,31 +162,38 @@ function statusToChinese(status: string): string {
 export function makeListDocumentsTool(tenantId: string) {
   return tool(
     async (): Promise<string> => {
-      const admin = createAdminClient();
-      // ⚠️ 铁律 3 + EXPERIENCE 主题 6/16.2:admin client 必须显式 .eq('user_id', tenantId)
-      //    漏了即跨租户泄漏(C 端匿名同样走这条 admin 路径)
-      const { data, error } = await admin
-        .from('documents')
-        .select('id, title, status, chunk_count')
-        .eq('user_id', tenantId)
-        .order('created_at', { ascending: false });
+      // Step 25.1b 层 1:工具体外层 try/catch 控降级文案质量(同 search 注释)
+      // 降级串不含 REFUSAL_MARKERS 任一标记,避免拒答清洗误触
+      try {
+        const admin = createAdminClient();
+        // ⚠️ 铁律 3 + EXPERIENCE 主题 6/16.2:admin client 必须显式 .eq('user_id', tenantId)
+        //    漏了即跨租户泄漏(C 端匿名同样走这条 admin 路径)
+        const { data, error } = await admin
+          .from('documents')
+          .select('id, title, status, chunk_count')
+          .eq('user_id', tenantId)
+          .order('created_at', { ascending: false });
 
-      if (error) {
-        throw new Error(`查询文档列表失败:${error.message}`);
+        if (error) {
+          throw new Error(`查询文档列表失败:${error.message}`);
+        }
+
+        const rows = (data ?? []) as DocumentRow[];
+        if (rows.length === 0) {
+          return '当前知识库暂无文档。';
+        }
+
+        // 主返回字符串(主题 16.1:工具主返回服务 LLM,不用结构化 JSON)
+        return rows
+          .map(
+            (r) =>
+              `「${r.title}」— ${statusToChinese(r.status)} — ${r.chunk_count ?? 0} 块`,
+          )
+          .join('\n');
+      } catch (err: unknown) {
+        console.error('[tool/list] 失败(降级):', { tenantId, err });
+        return '当前无法获取知识库文档列表,请稍后再试。';
       }
-
-      const rows = (data ?? []) as DocumentRow[];
-      if (rows.length === 0) {
-        return '当前知识库暂无文档。';
-      }
-
-      // 主返回字符串(主题 16.1:工具主返回服务 LLM,不用结构化 JSON)
-      return rows
-        .map(
-          (r) =>
-            `「${r.title}」— ${statusToChinese(r.status)} — ${r.chunk_count ?? 0} 块`,
-        )
-        .join('\n');
     },
     {
       name: 'list_documents',

@@ -107,9 +107,13 @@ export function makeAgentGraph(tenantId: string, sessionId: string) {
     return END;
   }
 
+  // Step 25.1b:ToolNode 显式声明 handleToolErrors: true(LangGraph 1.3.2 默认即 true,
+  // 显式只为代码自证)。25.1a-spike 实证:工具抛错被包成 ToolMessage(status='error',
+  // content='Error: ... Please fix your mistakes.')回灌 LLM,不外抛、不冒 500。
+  // 工具内已有的 try/catch 降级(tools.ts search/list 外壳)是层 1,这层是层 2 兜底。
   const graph = new StateGraph(MessagesAnnotation)
     .addNode('agent', callModel)
-    .addNode('tools', new ToolNode(tools))
+    .addNode('tools', new ToolNode(tools, { handleToolErrors: true }))
     .addEdge(START, 'agent')
     .addConditionalEdges('agent', shouldContinue)
     .addEdge('tools', 'agent')
