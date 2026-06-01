@@ -29,6 +29,7 @@ import {
   makeSearchKnowledgeBaseTool,
   makeListDocumentsTool,
   makeEscalateToHumanTool,
+  makeRecordUserFeedbackTool,
   type CollectedChunk,
 } from './tools';
 
@@ -45,8 +46,12 @@ import {
  * 必须由 route.ts 已建立/已校验后传入,绝不能让 LLM 通过工具参数传。
  * escalate 的写库与 collector / finalCitations 通道完全独立,23.3c 红线零交集。
  *
- * @param tenantId  租户 ID,通过工厂闭包注入工具(search/list/escalate),LLM 不可见。
- * @param sessionId 当前对话 session ID,通过工厂闭包注入 escalate_to_human,LLM 不可见。
+ * Step 24.3:record_user_feedback 同样靠这条 sessionId 闭包绑定到 user_feedback 表
+ * (该表也无 user_id 列,隔离同样靠 session_id->chat_sessions 间接),与 collector
+ * 通道完全独立。
+ *
+ * @param tenantId  租户 ID,通过工厂闭包注入工具(search/list/escalate/feedback),LLM 不可见。
+ * @param sessionId 当前对话 session ID,通过工厂闭包注入 escalate_to_human / record_user_feedback,LLM 不可见。
  * @returns { graph, collector } —— collector 在 graph 整个生命周期内被工具内部 push,
  *          单次请求一份,无跨请求污染。
  */
@@ -60,10 +65,12 @@ export function makeAgentGraph(tenantId: string, sessionId: string) {
   const collector: CollectedChunk[] = [];
   // Step 24.1:list_documents 纯读、无副产物,不接 collector,与 search 复用同一个 ToolNode
   // Step 24.2:escalate_to_human 写库副作用与 collector 完全独立(23.3c 红线零交集)
+  // Step 24.3:record_user_feedback 写 user_feedback 表,与 collector / 拒答清洗零交集
   const tools = [
     makeSearchKnowledgeBaseTool(tenantId, collector),
     makeListDocumentsTool(tenantId),
     makeEscalateToHumanTool(tenantId, sessionId),
+    makeRecordUserFeedbackTool(tenantId, sessionId),
   ];
 
   // 坑 1:绝不设 streaming: true

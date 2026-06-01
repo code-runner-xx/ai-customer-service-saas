@@ -255,3 +255,90 @@ export function makeEscalateToHumanTool(
     },
   );
 }
+
+// ---------- Step 24.3 record_user_feedback 工具 ----------
+// 与 escalate 同构:tenantId/sessionId 闭包注入,schema 只暴露 { rating, comment? }(LLM 不可见 ids)。
+// 用途:用户**主动**对前一轮 Agent 回答表达满意/不满时,把评价写入 user_feedback 表。
+//
+// 隔离设计(铁律 3 + EXPERIENCE 主题 6/16.1):
+// - user_feedback 没有 user_id 列,隔离 100% 靠 sessionId 间接做(经 chat_sessions 与 tenantId 强绑)。
+// - sessionId 必须是 route.ts 已建立/已校验的 finalSid,绝不能让 LLM 通过参数传。
+// - tenantId 当前不参与 SQL 过滤,仅用于失败日志携带租户上下文 / 未来扩展;保留它对齐主题 16.1 闭包范式。
+//
+// message_id 取舍(方案 A):
+// - 当前轮 assistant 消息的 DB id 在 route.ts onFinish 流结束后才 insert 生成,
+//   工具调用发生在流进行中,时序上拿不到。强行传会语义错位。
+// - user_feedback.message_id 已设计为可空,insert 时不带该字段、DB 落 NULL,避免错链。
+// - 后续若需精确钉到某条 assistant 行,通过 created_at 时间窗 join chat_sessions/chat_messages 反查即可。
+//
+// 与 23.3c citations 通道的关系:
+// - 这条 admin insert 写的是 user_feedback 表,与 collector / finalCitations / chat_messages 三条道完全独立。
+// - 拒答清洗 / 三连坑修法 / collector 通道 0 触碰。
+//
+// 容错策略(主题 4.2):
+// - 写库失败仅 console.error 不抛 —— 评价是运营信号,丢一条比让用户看到"反馈失败"更好。
+// - 无论写库成败都返同一句成功文案给 LLM。
+//
+// comment 防御:
+// - 运行时统一 `comment?.trim().slice(0, 1000) || null`:undefined / 空串 / 全空白 → null,
+//   与 user_feedback.comment 可空一致(DB 落 SQL NULL),避免存"空白条"。
+
+export function makeRecordUserFeedbackTool(
+  tenantId: string,
+  sessionId: string,
+) {
+  return tool(
+    async ({
+      rating,
+      comment,
+    }: {
+      rating: 'positive' | 'negative';
+      comment?: string;
+    }): Promise<string> => {
+      const admin = createAdminClient();
+      // undefined / 空串 / 全空白 统一归 null,落库为 SQL NULL(动手注意)
+      const normalizedComment: string | null =
+        comment?.trim().slice(0, 1000) || null;
+      try {
+        // 独立 insert:与 route.ts onFinish 写 assistant、与 escalate 写 chat_messages 三条均独立,
+        // 不读不写 collector / finalCitations(23.3c 红线零交集)。
+        // message_id 不写(方案 A,留 NULL):流中无法拿到本轮 assistant 行的 DB id。
+        await admin.from('user_feedback').insert({
+          session_id: sessionId,
+          rating,
+          comment: normalizedComment,
+        });
+      } catch (err) {
+        // 主题 4.2:副作用失败不阻断、不抛、不让用户看到运营侧失败
+        // tenantId 仅用于失败日志携带租户上下文(SQL 过滤靠 sessionId)
+        console.error('[tool/feedback] 写库失败(忽略):', {
+          tenantId,
+          sessionId,
+          rating,
+          err,
+        });
+      }
+      // 不论写库成败,LLM 都拿到同一句成功文案
+      return '感谢您的反馈,我们会持续改进。';
+    },
+    {
+      name: 'record_user_feedback',
+      description:
+        '当用户主动对前一轮回答表达满意(如「有用」「谢谢」「解决了」)或不满(如「没用」「答错了」「不对」)时调用,记录其评价。不要主动索取反馈、不要每轮都调。',
+      schema: z.object({
+        rating: z
+          .enum(['positive', 'negative'])
+          .describe(
+            '用户对前一轮回答的评价:positive=满意,negative=不满',
+          ),
+        comment: z
+          .string()
+          .max(1000)
+          .optional()
+          .describe(
+            '可选,用中文简明记录用户原话要点(如「答案准确解决了我的问题」)',
+          ),
+      }),
+    },
+  );
+}
