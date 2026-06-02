@@ -7,6 +7,7 @@ export async function rerank(
   query: string,
   documents: string[],
   topN: number,
+  signal?: AbortSignal,
 ): Promise<RerankResult[]> {
   const apiKey = process.env.SILICONFLOW_API_KEY;
   const baseURL = process.env.SILICONFLOW_BASE_URL;
@@ -19,6 +20,7 @@ export async function rerank(
     query,
     documents,
     topN,
+    signal,
   });
 }
 

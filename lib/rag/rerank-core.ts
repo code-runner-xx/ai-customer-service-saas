@@ -24,6 +24,8 @@ export interface RerankParams {
   query: string;
   documents: string[];
   topN: number;
+  /** Step 26.3 方案 A 豁免:可选 signal,透传给 fetch 用于 abort/超时控制 */
+  signal?: AbortSignal;
 }
 
 interface RerankResultRaw {
@@ -57,7 +59,7 @@ function extractResults(parsed: unknown): RerankResultRaw[] {
 }
 
 export async function rerankDocuments(params: RerankParams): Promise<RerankResult[]> {
-  const { apiKey, baseURL, model, query, documents, topN } = params;
+  const { apiKey, baseURL, model, query, documents, topN, signal } = params;
 
   if (documents.length === 0) return [];
 
@@ -81,6 +83,7 @@ export async function rerankDocuments(params: RerankParams): Promise<RerankResul
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal,
   });
 
   // 严格顺序:status → text() → JSON.parse(主题 7.1,顺序不可调换)

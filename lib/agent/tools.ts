@@ -20,6 +20,7 @@
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { embedTexts } from '@/lib/rag/embed';
+import { rerank } from '@/lib/rag/rerank';
 import { createAdminClient } from '@/lib/supabase/admin';
 
 interface RpcRow {
@@ -30,9 +31,16 @@ interface RpcRow {
   metadata: Record<string, unknown>;
 }
 
-// 行为对齐 lib/rag/retrieve.ts:同一 RPC、同一 embedding 模型、同一 topK
+// 行为对齐 lib/rag/retrieve.ts:同一 RPC、同一 embedding 模型
 // 差异:显式传 min_similarity=0.3 锁住默认值(对齐 Step 22 + route.ts 显式声明习惯)
-const TOP_K = 5;
+//
+// Step 26.3:召回 RECALL_K 条 → rerank 精排到 FINAL_K 条
+// - RECALL_K=20:rerank 候选池大小(26.1 实测 20 条 ~500-800ms,远低于 50s wall-clock)
+// - FINAL_K=5:进入后续 contextText / collector / 编号的最终条数(与 V2 原 TOP_K 一致,保后半段不变)
+// - RERANK_TIMEOUT_MS=3000:rerank 独立超时,失败/超时静默回退召回 pgvector top-5
+const RECALL_K = 20;
+const FINAL_K = 5;
+const RERANK_TIMEOUT_MS = 3000;
 const MIN_SIMILARITY = 0.3;
 
 /**
@@ -76,7 +84,7 @@ export function makeSearchKnowledgeBaseTool(
         const { data, error } = await admin.rpc('match_document_chunks', {
           query_embedding: queryEmbedding,
           tenant_id: tenantId,
-          match_count: TOP_K,
+          match_count: RECALL_K,
           min_similarity: MIN_SIMILARITY,
         });
 
@@ -89,10 +97,44 @@ export function makeSearchKnowledgeBaseTool(
           return '知识库中未找到与该问题相关的内容。';
         }
 
+        // Step 26.3:召回 RECALL_K → rerank 精排 FINAL_K
+        // rerank 降级 = 精排失败,静默回退召回 pgvector top-5(检索成功,仅精排失败)
+        // 区别于 Step 25.1 工具级降级串 = 整个检索失败返中文文案(主题 17.4 层1)。两者不同层,勿混。
+        // - 独立 try/catch,与外层 Step 25.1 层 1 不复用
+        // - AbortController + RERANK_TIMEOUT_MS 透传 signal(主题 17.2,fetch 原生认 signal)
+        // - 失败/超时:console.warn 留痕 + finalRows = rows.slice(0, FINAL_K)(pgvector top-5)
+        // - 不返中文降级文案、不往 collector 推降级标记 —— 前端对 rerank 降级完全无感
+        let finalRows: RpcRow[];
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), RERANK_TIMEOUT_MS);
+          try {
+            const reranked = await rerank(
+              query,
+              rows.map((r) => r.content),
+              FINAL_K,
+              controller.signal,
+            );
+            finalRows = reranked.map((rr) => rows[rr.index]);
+          } finally {
+            clearTimeout(timer);
+          }
+        } catch (err: unknown) {
+          console.warn('[tool/search] rerank 降级 → 回退召回 pgvector top-5', {
+            tenantId,
+            query,
+            err:
+              err instanceof Error
+                ? { name: err.name, message: err.message }
+                : err,
+          });
+          finalRows = rows.slice(0, FINAL_K);
+        }
+
         // Step 23.3c:回填 documentTitle(RPC 不返,复刻 lib/rag/retrieve.ts 第二步)
         // ⚠️ 铁律 3 + EXPERIENCE 主题 6:admin client 显式 .eq('user_id', tenantId)
         //    不能漏,漏了即跨租户泄漏(C 端匿名调用同样走这条 admin 路径)
-        const docIds = [...new Set(rows.map((r) => r.document_id))];
+        const docIds = [...new Set(finalRows.map((r) => r.document_id))];
         const { data: docs, error: docErr } = await admin
           .from('documents')
           .select('id, title')
@@ -112,7 +154,7 @@ export function makeSearchKnowledgeBaseTool(
 
         // Step 23.3c 副产物:结构化字段 push 进 collector(LLM 不可见)
         // 多轮工具调用时同一 chunkId 可能被多次 push,去重责任在 route.ts 聚合时统一做
-        for (const r of rows) {
+        for (const r of finalRows) {
           collector.push({
             chunkId: r.id,
             documentId: r.document_id,
@@ -123,7 +165,7 @@ export function makeSearchKnowledgeBaseTool(
         }
 
         // 工具 return 与 23.2 完全一致(LLM 看到的契约字节级不变)
-        return rows.map((r, i) => `[来源 ${i + 1}] ${r.content}`).join('\n\n');
+        return finalRows.map((r, i) => `[来源 ${i + 1}] ${r.content}`).join('\n\n');
       } catch (err: unknown) {
         console.error('[tool/search] 失败(降级):', { tenantId, query, err });
         return '当前知识库检索暂时不可用,请稍后再试或换个表达方式。';
