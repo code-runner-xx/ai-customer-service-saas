@@ -6,6 +6,7 @@ import {
   AIMessageChunk,
   HumanMessage,
   SystemMessage,
+  ToolMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
 import { GraphRecursionError } from '@langchain/langgraph';
@@ -211,6 +212,11 @@ export async function POST(request: Request) {
       const timeoutId = setTimeout(() => abortController.abort(), 50_000);
 
       let fullText = '';
+      // Step 27.2:同一 tool_call_id 只推一次 tool_status:start
+      // - 27.1/27.2 spike 实测:LangChain 1.x 聚合后,每个 phase 只有 1 个 agent chunk 含 tool_calls
+      // - 加最小防御性 dedup 兜底未来聚合实现变化,避免前端状态条闪烁(主题 16.3 精神)
+      // - phase=end 不去重:每个 ToolMessage 一次,按 tool_call_id 自然唯一
+      const toolStatusSeen = new Set<string>();
       try {
         for await (const chunk of await graph.stream(
           { messages: langchainMessages },
@@ -225,6 +231,52 @@ export async function POST(request: Request) {
           // spike 坑 3 心法:agent 节点 + content 非空 = 最终回答 token
           // 自动排除:tools 节点输出、step=1 的 tool_call 增量流(content 全空)
           const node = isRecord(metadata) ? metadata.langgraph_node : undefined;
+
+          // Step 27.2:② 源 tool_status:start — LLM 决定调工具的瞬间(content 空、tool_calls 非空)
+          // - 27.2 spike 实测 t_toolcall=1517ms,比 ③ 源 t_toolmsg=3470ms 早 1953ms
+          // - 这条 chunk 是 content 空的 tool_call 增量,提前 continue 等价于被现役 `if (!text) continue` 丢弃,
+          //   text 流回答完整性零影响(命中条件 tool_calls.length>0,最终回答 token chunk 不命中)
+          if (
+            node === 'agent'
+            && (msg instanceof AIMessage || msg instanceof AIMessageChunk)
+            && Array.isArray(msg.tool_calls)
+            && msg.tool_calls.length > 0
+          ) {
+            for (const tc of msg.tool_calls) {
+              if (!isRecord(tc)) continue;
+              const toolName = typeof tc.name === 'string' ? tc.name : undefined;
+              const toolCallId = typeof tc.id === 'string' ? tc.id : undefined;
+              if (!toolName || !toolCallId) continue;
+              if (toolStatusSeen.has(toolCallId)) continue;
+              toolStatusSeen.add(toolCallId);
+              dataStream.writeData({
+                type: 'tool_status',
+                phase: 'start',
+                toolName,
+                toolCallId,
+              } as unknown as JSONValue);
+            }
+            continue;
+          }
+
+          // Step 27.2:③ 源 tool_status:end — ToolNode 把工具 await 返回值包成 ToolMessage 发出
+          // - 27.1 spike 实证 4/4 phase 全部从 ToolMessage.name 拿到具体工具名,带 tool_call_id 双重权威
+          // - 进入本分支后必 continue,tools 节点 chunk 不会落到现役 filter(本就被 `if (node !== 'agent') continue` 丢)
+          if (node === 'tools' && msg instanceof ToolMessage) {
+            const toolName = typeof msg.name === 'string' ? msg.name : undefined;
+            const toolCallId =
+              typeof msg.tool_call_id === 'string' ? msg.tool_call_id : undefined;
+            if (toolName && toolCallId) {
+              dataStream.writeData({
+                type: 'tool_status',
+                phase: 'end',
+                toolName,
+                toolCallId,
+              } as unknown as JSONValue);
+            }
+            continue;
+          }
+
           if (node !== 'agent') continue;
           if (!(msg instanceof AIMessageChunk)) continue;
           const text = typeof msg.content === 'string' ? msg.content : '';
