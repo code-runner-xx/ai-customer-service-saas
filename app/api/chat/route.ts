@@ -46,19 +46,35 @@ interface Citation {
   similarity: number;
 }
 
-// ---------- 拒答检测(Step 23.3c 启用)----------
-// System prompt 原话:"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。"
-// 取两串高辨识度片段做 AND 匹配:容忍 LLM 微改标点/缺字,也避免真实答案里偶尔出现单串被误伤。
+// ---------- 拒答检测(Step 23.3c 启用,Step 27.4 marker 加固)----------
+// System prompt 仍指示 LLM 输出"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。"
+// 保留 prompt 规范约束(LLM 越规范输出 marker 越易命中,正向引导)。
+//
+// 但 V2 Agent 化后 LLM 有自然化倾向会插字,如"没有找到【关于火星时间的】相关信息"(27.3 实测 9 字)
+// → 旧 includes 找连续子串太脆,marker 1 漏判 → AND 整体 false → citations 未清(27.3 dev 手测⑤ 实证)。
+//
+// 27.4 改造:把单个长 marker 改成"语义核心片段组 + 允许中间插字"的正则,保持 AND 双条件(主题 7.2)
+//   - PATTERN_A(语义"没查到内容"):(没有找到|未找到|查不到|找不到) 与 (相关信息|相关内容|相关资料)
+//     之间允许插 0-30 字(实测插 9 字,30 字给冗余;{0,30} 上限挡远距误命中,31 字超界立即 false)
+//   - PATTERN_B(语义"建议转人工"):(联系人工|人工客服|转人工) 任一
+//   - 判定 = A.test && B.test(主题 7.2 AND 防误判初衷;主题 16.4 判文本不判 collector)
+//
 // 命中 → finalCitations 置空,DB 和前端 data part 同步不渲染引用 chip;
 // 天然覆盖"Agent 调了检索、collector 非空、但模型输出拒答文本"的 case。
-const REFUSAL_MARKERS = ['没有找到相关信息', '联系人工客服'];
+//
+// 已知遗留(主题 18.2 不藏风险):双条件 AND 固有妥协 — 正常长回答里 A B 各自独立出现会被
+// 误判 true(如"找不到该型号产品的相关信息,可以致电技术支持热线,也可以联系人工客服。"),
+// 留给技术债 (o) 完整解(分数判/语义判),本 Step 不引入分数判 / collector 长度判 / LLM 自评。
+const REFUSAL_PATTERN_A = /(没有找到|未找到|查不到|找不到)[\s\S]{0,30}(相关信息|相关内容|相关资料)/;
+const REFUSAL_PATTERN_B = /(联系人工|人工客服|转人工)/;
 function isRefusalText(text: string): boolean {
-  return REFUSAL_MARKERS.every((m) => text.includes(m));
+  return REFUSAL_PATTERN_A.test(text) && REFUSAL_PATTERN_B.test(text);
 }
 
 // ---------- V2 Agent system prompt ----------
-// 拒答原句严格沿用 V1 措辞,含 REFUSAL_MARKERS 两词,保证 Step 23.3c 接拒答清洗时
-// isRefusalText 双标记 AND 匹配能命中。
+// 拒答原句严格沿用 V1 措辞,同时命中 REFUSAL_PATTERN_A 与 PATTERN_B,
+// 保证 Step 23.3c/27.4 接拒答清洗时 isRefusalText 双条件 AND 匹配能命中。
+// Step 27.4 后 PATTERN_A 容忍中间插 0-30 字,即便 LLM 自然化输出"没有找到 XX 的相关信息"也能命中。
 const SYSTEM_PROMPT = `你是企业专属客服助手。
 
 可用工具:
@@ -291,7 +307,7 @@ export async function POST(request: Request) {
         //   接住,不会冒到这里;这里专接图级错误
         // - 降级文本经 dataStream.write 直推前端(不经 LLM 二次生成,避免二次失败)
         // - fullText 续接(决策①):已流 token + fallback,DB 与前端 UX 一致
-        // - 三句 fallback 均不含 REFUSAL_MARKERS 任一标记(决策③),不触发拒答清洗
+        // - 三句 fallback 均不命中 REFUSAL_PATTERN_A/PATTERN_B 任一(决策③),不触发拒答清洗
         console.error('[chat] graph 异常:', err);
         const lcErrCode = (err as { lc_error_code?: string })?.lc_error_code;
         const errName = (err as { name?: string })?.name;
