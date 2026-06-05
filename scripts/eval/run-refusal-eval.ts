@@ -1,4 +1,5 @@
 // V2 Step 27.5.1 — 拒答行为评估脚本(prefix baseline / postfix 复跑同一份)
+// V2 Step 27.5.2 — 扩 variant:postfix-ext(库外 20 题)/ postfix-int(库内 44 题 + top1_sim)
 //
 // ════════════════════════════════════════════════════════════════════════════════
 // ★ 铁律 1:本脚本控制流与 lib/agent/graph.ts 同构非同源
@@ -25,12 +26,16 @@
 // 跑法:
 //   改 prompt 前(prefix baseline):
 //     npx tsx --env-file=.env.local scripts/eval/run-refusal-eval.ts prefix
-//   改 prompt 后(postfix):
-//     npx tsx --env-file=.env.local scripts/eval/run-refusal-eval.ts postfix
+//   改 prompt 后(库外 20 题):
+//     npx tsx --env-file=.env.local scripts/eval/run-refusal-eval.ts postfix-ext
+//   改 prompt 后(库内 44 题 + top1_sim):
+//     npx tsx --env-file=.env.local scripts/eval/run-refusal-eval.ts postfix-int
 //
-// 输出:eval/results/refusal-baseline-{prefix|postfix}.json
+// 输出:eval/results/refusal-baseline-{prefix|postfix-ext|postfix-int}.json
 //
-// 测试集:eval/refusal-testset.jsonl(24 题:库外 20 + 库内对照 4)
+// 测试集:
+//   prefix / postfix-ext → eval/refusal-testset.jsonl(库外 20 + 库内对照 4;ext 模式过滤 int_control)
+//   postfix-int          → eval/testset-final.jsonl(Step 22 全 44 题,转为 int_full 类别)
 
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -73,13 +78,20 @@ const RERANK_TIMEOUT_MS = 3000;
 const MIN_SIMILARITY = 0.3;
 const RERANK_MODEL = 'BAAI/bge-reranker-v2-m3';
 
-type Category = 'ext_code' | 'ext_general' | 'ext_misc' | 'int_control';
+type Category =
+  | 'ext_code'
+  | 'ext_general'
+  | 'ext_misc'
+  | 'int_control'
+  | 'int_full';
 
 interface TestCase {
   qid: string;
   question: string;
   category: Category;
   ground_truth_should_refuse: boolean;
+  ground_truth_chapter?: string; // Step 22 testset 字段,int_full 可用
+  question_type?: string;        // Step 22 testset 字段,int_full 可用
 }
 
 interface CaseResult extends TestCase {
@@ -89,6 +101,7 @@ interface CaseResult extends TestCase {
   isRefusal: boolean;
   matches_ground_truth: boolean;
   elapsed_ms: number;
+  top1_sim?: number | null;       // postfix-int 模式专用:每题前置 retrieve top-1 cosine
 }
 
 interface RpcRow {
@@ -373,6 +386,61 @@ async function loadTestset(filePath: string): Promise<TestCase[]> {
   return cases;
 }
 
+// Step 22 测试集 schema(Step 27.5.2 postfix-int 复用):
+// {id, question, question_type, ground_truth_chapter, secondary_chapters, source_chunk_preview}
+// 转成本脚本 TestCase 格式,category=int_full,ground_truth_should_refuse=false(库内本就不该拒)
+interface Step22TestCase {
+  id: string;
+  question: string;
+  question_type?: string;
+  ground_truth_chapter?: string;
+}
+async function loadInternalFullTestset(filePath: string): Promise<TestCase[]> {
+  const raw = await fs.readFile(filePath, 'utf-8');
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const cases: TestCase[] = [];
+  for (const line of lines) {
+    const obj = JSON.parse(line) as Step22TestCase;
+    cases.push({
+      qid: obj.id,
+      question: obj.question,
+      category: 'int_full',
+      ground_truth_should_refuse: false,
+      question_type: obj.question_type,
+      ground_truth_chapter: obj.ground_truth_chapter,
+    });
+  }
+  return cases;
+}
+
+// 取该题 pgvector top-1 cosine 相似度(MIN_SIMILARITY=0 不过滤,真 top-1)。
+// 仅 postfix-int 模式用,目的是诊断"库内误拒是否集中在中等偏低相似度区间"。
+// 与生产 search 不同:这里 K=1 / MIN_SIM=0,纯粹拿排第一的余弦相似度,不参与 Agent 决策。
+async function retrieveTop1Sim(
+  admin: SupabaseClient,
+  embedConfig: EmbedConfig,
+  query: string,
+): Promise<number | null> {
+  try {
+    const vectors = await embedTextsWithConfig([query], embedConfig);
+    const { data, error } = await admin.rpc('match_document_chunks', {
+      query_embedding: vectors[0],
+      tenant_id: TENANT_ID,
+      match_count: 1,
+      min_similarity: 0,
+    });
+    if (error) {
+      console.warn('[eval/top1-sim] RPC 失败:', error.message);
+      return null;
+    }
+    const rows = (data ?? []) as RpcRow[];
+    return rows[0]?.similarity ?? null;
+  } catch (err) {
+    console.warn('[eval/top1-sim] 取 top-1 sim 失败(降级 null):', err);
+    return null;
+  }
+}
+
 interface CategorySummary {
   total: number;
   refused: number;
@@ -381,71 +449,141 @@ interface CategorySummary {
   match_rate: string;
 }
 
+interface ExtSummary {
+  total: number;
+  refused: number;
+  refusal_rate: string;
+  code: CategorySummary;
+  general: CategorySummary;
+  misc: CategorySummary;
+}
+
+interface IntControlSummary {
+  total: number;
+  false_refused: number;
+  false_refusal_rate: string;
+}
+
+interface IntFullSummary {
+  total: number;
+  false_refused: number;
+  false_refusal_rate: string;
+  // postfix-int 专用:误拒清单(qid / question / top1_sim / chapter)
+  false_refusal_cases: Array<{
+    qid: string;
+    question: string;
+    top1_sim: number | null;
+    ground_truth_chapter?: string;
+    question_type?: string;
+    fullText: string;
+  }>;
+  // 全 44 题的 top-1 sim 分布(诊断"误拒是否集中在中等偏低相似度")
+  top1_sim_distribution: {
+    min: number | null;
+    p25: number | null;
+    p50: number | null;
+    p75: number | null;
+    max: number | null;
+  };
+}
+
 interface Summary {
   total: number;
-  ext: {
-    total: number;
-    refused: number;
-    refusal_rate: string;
-    code: CategorySummary;
-    general: CategorySummary;
-    misc: CategorySummary;
+  ext?: ExtSummary;
+  int_control?: IntControlSummary;
+  int_full?: IntFullSummary;
+}
+
+function byCategorySummary(results: CaseResult[], cat: Category): CategorySummary {
+  const sub = results.filter((r) => r.category === cat);
+  const refused = sub.filter((r) => r.isRefusal).length;
+  const matches = sub.filter((r) => r.matches_ground_truth).length;
+  return {
+    total: sub.length,
+    refused,
+    refusal_rate: sub.length === 0 ? '0/0' : `${refused}/${sub.length}`,
+    matches_gt: matches,
+    match_rate: sub.length === 0 ? '0/0' : `${matches}/${sub.length}`,
   };
-  int: {
-    total: number;
-    false_refused: number;
-    false_refusal_rate: string;
-  };
+}
+
+function percentile(sorted: number[], p: number): number | null {
+  if (sorted.length === 0) return null;
+  const idx = Math.min(sorted.length - 1, Math.floor(p * sorted.length));
+  return sorted[idx];
 }
 
 function summarize(results: CaseResult[]): Summary {
-  const byCategory = (cat: Category): CategorySummary => {
-    const sub = results.filter((r) => r.category === cat);
-    const refused = sub.filter((r) => r.isRefusal).length;
-    const matches = sub.filter((r) => r.matches_ground_truth).length;
-    return {
-      total: sub.length,
-      refused,
-      refusal_rate: sub.length === 0 ? '0/0' : `${refused}/${sub.length}`,
-      matches_gt: matches,
-      match_rate: sub.length === 0 ? '0/0' : `${matches}/${sub.length}`,
-    };
-  };
+  const out: Summary = { total: results.length };
 
-  const code = byCategory('ext_code');
-  const general = byCategory('ext_general');
-  const misc = byCategory('ext_misc');
-  const ext = results.filter((r) => r.category !== 'int_control');
-  const extRefused = ext.filter((r) => r.isRefusal).length;
-
-  const intControl = results.filter((r) => r.category === 'int_control');
-  const intFalseRefused = intControl.filter((r) => r.isRefusal).length;
-
-  return {
-    total: results.length,
-    ext: {
+  const ext = results.filter((r) =>
+    ['ext_code', 'ext_general', 'ext_misc'].includes(r.category),
+  );
+  if (ext.length > 0) {
+    const extRefused = ext.filter((r) => r.isRefusal).length;
+    out.ext = {
       total: ext.length,
       refused: extRefused,
-      refusal_rate: ext.length === 0 ? '0/0' : `${extRefused}/${ext.length}`,
-      code,
-      general,
-      misc,
-    },
-    int: {
+      refusal_rate: `${extRefused}/${ext.length}`,
+      code: byCategorySummary(results, 'ext_code'),
+      general: byCategorySummary(results, 'ext_general'),
+      misc: byCategorySummary(results, 'ext_misc'),
+    };
+  }
+
+  const intControl = results.filter((r) => r.category === 'int_control');
+  if (intControl.length > 0) {
+    const intFalseRefused = intControl.filter((r) => r.isRefusal).length;
+    out.int_control = {
       total: intControl.length,
       false_refused: intFalseRefused,
-      false_refusal_rate:
-        intControl.length === 0
-          ? '0/0'
-          : `${intFalseRefused}/${intControl.length}`,
-    },
-  };
+      false_refusal_rate: `${intFalseRefused}/${intControl.length}`,
+    };
+  }
+
+  const intFull = results.filter((r) => r.category === 'int_full');
+  if (intFull.length > 0) {
+    const intFalseRefused = intFull.filter((r) => r.isRefusal).length;
+    const sims = intFull
+      .map((r) => r.top1_sim)
+      .filter((v): v is number => typeof v === 'number')
+      .sort((a, b) => a - b);
+    out.int_full = {
+      total: intFull.length,
+      false_refused: intFalseRefused,
+      false_refusal_rate: `${intFalseRefused}/${intFull.length}`,
+      false_refusal_cases: intFull
+        .filter((r) => r.isRefusal)
+        .map((r) => ({
+          qid: r.qid,
+          question: r.question,
+          top1_sim: r.top1_sim ?? null,
+          ground_truth_chapter: r.ground_truth_chapter,
+          question_type: r.question_type,
+          fullText: r.fullText,
+        })),
+      top1_sim_distribution: {
+        min: sims[0] ?? null,
+        p25: percentile(sims, 0.25),
+        p50: percentile(sims, 0.5),
+        p75: percentile(sims, 0.75),
+        max: sims[sims.length - 1] ?? null,
+      },
+    };
+  }
+
+  return out;
 }
 
+type Variant = 'prefix' | 'postfix-ext' | 'postfix-int';
+
 async function main(): Promise<void> {
-  const variant = (process.argv[2] ?? 'prefix').trim();
-  if (variant !== 'prefix' && variant !== 'postfix') {
-    console.error('[失败] 用法:npx tsx ... run-refusal-eval.ts <prefix|postfix>');
+  const variant = (process.argv[2] ?? '').trim() as Variant;
+  const validVariants: Variant[] = ['prefix', 'postfix-ext', 'postfix-int'];
+  if (!validVariants.includes(variant)) {
+    console.error(
+      '[失败] 用法:npx tsx ... run-refusal-eval.ts <prefix|postfix-ext|postfix-int>',
+    );
     process.exit(1);
   }
 
@@ -455,14 +593,26 @@ async function main(): Promise<void> {
   const siliconBase = requireEnv('SILICONFLOW_BASE_URL');
 
   const repoRoot = path.resolve(__dirname, '../..');
-  const testsetPath = path.join(repoRoot, 'eval', 'refusal-testset.jsonl');
   const resultsDir = path.join(repoRoot, 'eval', 'results');
   const resultsPath = path.join(
     resultsDir,
     `refusal-baseline-${variant}.json`,
   );
 
-  const cases = await loadTestset(testsetPath);
+  // 按 variant 选 testset + 过滤
+  let testsetPath: string;
+  let cases: TestCase[];
+  if (variant === 'postfix-int') {
+    testsetPath = path.join(repoRoot, 'eval', 'testset-final.jsonl');
+    cases = await loadInternalFullTestset(testsetPath);
+  } else {
+    testsetPath = path.join(repoRoot, 'eval', 'refusal-testset.jsonl');
+    const all = await loadTestset(testsetPath);
+    cases =
+      variant === 'postfix-ext'
+        ? all.filter((c) => c.category !== 'int_control') // 库外 20
+        : all; // prefix 跑全 24
+  }
 
   const admin = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -471,7 +621,7 @@ async function main(): Promise<void> {
   const graph = buildGraph(admin, embedConfig, siliconKey, siliconBase);
 
   console.log('═'.repeat(78));
-  console.log(`V2 Step 27.5.1 — 拒答评估(${variant} baseline)`);
+  console.log(`V2 Step 27.5.x — 拒答评估(${variant})`);
   console.log('═'.repeat(78));
   console.log(`TENANT_ID = ${TENANT_ID}`);
   console.log(
@@ -488,9 +638,23 @@ async function main(): Promise<void> {
     console.log(`\n${'─'.repeat(78)}`);
     console.log(`[${i + 1}/${cases.length}] ${c.qid} (${c.category})`);
     console.log(`  question: ${c.question}`);
-    console.log(`  ground_truth_should_refuse: ${c.ground_truth_should_refuse}`);
+    console.log(
+      `  ground_truth_should_refuse: ${c.ground_truth_should_refuse}`,
+    );
+
+    // postfix-int 模式:每题前置 retrieve top-1 cosine(MIN_SIM=0,真 top-1)
+    let top1Sim: number | null | undefined;
+    if (variant === 'postfix-int') {
+      top1Sim = await retrieveTop1Sim(admin, embedConfig, c.question);
+      console.log(
+        `  top1_sim (pgvector cosine, K=1, MIN_SIM=0): ${top1Sim === null ? 'null' : top1Sim.toFixed(4)}`,
+      );
+    }
+
     const r = await runOne(graph, c);
+    if (variant === 'postfix-int') r.top1_sim = top1Sim ?? null;
     results.push(r);
+
     const preview =
       r.fullText.length > 240
         ? `${r.fullText.slice(0, 240)}…(${r.fullText.length}字)`
@@ -504,34 +668,76 @@ async function main(): Promise<void> {
   const summary = summarize(results);
 
   console.log(`\n${'═'.repeat(78)}`);
-  console.log('★ 24 题完整结果表');
+  console.log(`★ ${cases.length} 题完整结果表`);
   console.log('═'.repeat(78));
-  console.log(
-    `${'qid'.padEnd(14)} ${'category'.padEnd(13)} ${'gt_refuse'.padEnd(10)} ${'isRefusal'.padEnd(10)} ${'matches_gt'.padEnd(11)} question`,
-  );
-  for (const r of results) {
+  if (variant === 'postfix-int') {
     console.log(
-      `${r.qid.padEnd(14)} ${r.category.padEnd(13)} ${String(r.ground_truth_should_refuse).padEnd(10)} ${String(r.isRefusal).padEnd(10)} ${(r.matches_ground_truth ? '✓' : '✗').padEnd(11)} ${r.question}`,
+      `${'qid'.padEnd(8)} ${'top1_sim'.padEnd(10)} ${'isRefusal'.padEnd(10)} ${'chapter'.padEnd(16)} question`,
     );
+    for (const r of results) {
+      const sim =
+        typeof r.top1_sim === 'number' ? r.top1_sim.toFixed(4) : 'null';
+      console.log(
+        `${r.qid.padEnd(8)} ${sim.padEnd(10)} ${String(r.isRefusal).padEnd(10)} ${(r.ground_truth_chapter ?? '').padEnd(16)} ${r.question}`,
+      );
+    }
+  } else {
+    console.log(
+      `${'qid'.padEnd(14)} ${'category'.padEnd(13)} ${'gt_refuse'.padEnd(10)} ${'isRefusal'.padEnd(10)} ${'matches_gt'.padEnd(11)} question`,
+    );
+    for (const r of results) {
+      console.log(
+        `${r.qid.padEnd(14)} ${r.category.padEnd(13)} ${String(r.ground_truth_should_refuse).padEnd(10)} ${String(r.isRefusal).padEnd(10)} ${(r.matches_ground_truth ? '✓' : '✗').padEnd(11)} ${r.question}`,
+      );
+    }
   }
 
   console.log(`\n${'═'.repeat(78)}`);
   console.log('★ 汇总');
   console.log('═'.repeat(78));
-  console.log(`库外(20 题,期望拒答):`);
-  console.log(`  整体拒答率: ${summary.ext.refusal_rate}`);
-  console.log(`    · 编程(ext_code):   ${summary.ext.code.refusal_rate}`);
-  console.log(`    · 通用(ext_general):${summary.ext.general.refusal_rate}`);
-  console.log(`    · 业务(ext_misc):   ${summary.ext.misc.refusal_rate}`);
-  console.log(`库内(4 题,期望不拒答):`);
-  console.log(
-    `  误拒率: ${summary.int.false_refusal_rate}(应=0/4;非 0 立刻扩 Step 22 全 44 题复测)`,
-  );
+
+  if (summary.ext) {
+    console.log(`库外(${summary.ext.total} 题,期望拒答):`);
+    console.log(`  整体拒答率: ${summary.ext.refusal_rate}`);
+    console.log(`    · 编程(ext_code):   ${summary.ext.code.refusal_rate}`);
+    console.log(`    · 通用(ext_general):${summary.ext.general.refusal_rate}`);
+    console.log(`    · 业务(ext_misc):   ${summary.ext.misc.refusal_rate}`);
+  }
+  if (summary.int_control) {
+    console.log(`库内对照(${summary.int_control.total} 题,期望不拒答):`);
+    console.log(`  误拒率: ${summary.int_control.false_refusal_rate}`);
+  }
+  if (summary.int_full) {
+    const f = summary.int_full;
+    console.log(`库内全集(${f.total} 题,期望不拒答):`);
+    console.log(`  误拒率: ${f.false_refusal_rate}`);
+    console.log(
+      `  top1_sim 分布: min=${f.top1_sim_distribution.min?.toFixed(4) ?? 'null'} p25=${f.top1_sim_distribution.p25?.toFixed(4) ?? 'null'} p50=${f.top1_sim_distribution.p50?.toFixed(4) ?? 'null'} p75=${f.top1_sim_distribution.p75?.toFixed(4) ?? 'null'} max=${f.top1_sim_distribution.max?.toFixed(4) ?? 'null'}`,
+    );
+    if (f.false_refusal_cases.length > 0) {
+      console.log('  误拒清单:');
+      for (const c of f.false_refusal_cases) {
+        const sim =
+          typeof c.top1_sim === 'number' ? c.top1_sim.toFixed(4) : 'null';
+        console.log(
+          `    [${c.qid}] top1_sim=${sim} chapter=${c.ground_truth_chapter ?? '-'} type=${c.question_type ?? '-'}`,
+        );
+        console.log(`      Q: ${c.question}`);
+        console.log(
+          `      A: ${c.fullText.slice(0, 200).replace(/\n/g, ' ⏎ ')}${c.fullText.length > 200 ? '…' : ''}`,
+        );
+      }
+    } else {
+      console.log('  无误拒(库内全 44 题 isRefusal 全为 false)');
+    }
+  }
 
   await fs.mkdir(resultsDir, { recursive: true });
+  const stepLabel =
+    variant === 'prefix' ? '27.5.1' : variant === 'postfix-ext' ? '27.5.2' : '27.5.2';
   const payload = {
     ts: new Date().toISOString(),
-    step: `27.5.1-${variant}-baseline`,
+    step: `${stepLabel}-${variant}-baseline`,
     tenant_id: TENANT_ID,
     system_prompt_bytes: SYSTEM_PROMPT.length,
     pattern_a: String(REFUSAL_PATTERN_A),
