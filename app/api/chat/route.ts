@@ -15,6 +15,10 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { makeAgentGraph } from '@/lib/agent/graph';
 import type { CollectedChunk } from '@/lib/agent/tools';
+// Step 27.5.1:isRefusalText / REFUSAL_PATTERN_A/B 抽到 lib/agent/refusal.ts,
+// SYSTEM_PROMPT 抽到 lib/agent/prompt.ts;共享给 spike 与评估脚本,本文件改 import 复用同一份。
+import { isRefusalText } from '@/lib/agent/refusal';
+import { SYSTEM_PROMPT } from '@/lib/agent/prompt';
 
 export const runtime = 'nodejs';
 // Vercel Hobby 默认 10s,流式对话偶尔长一点也更稳
@@ -45,63 +49,6 @@ interface Citation {
   content: string;
   similarity: number;
 }
-
-// ---------- 拒答检测(Step 23.3c 启用,Step 27.4 marker 加固)----------
-// System prompt 仍指示 LLM 输出"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。"
-// 保留 prompt 规范约束(LLM 越规范输出 marker 越易命中,正向引导)。
-//
-// 但 V2 Agent 化后 LLM 有自然化倾向会插字,如"没有找到【关于火星时间的】相关信息"(27.3 实测 9 字)
-// → 旧 includes 找连续子串太脆,marker 1 漏判 → AND 整体 false → citations 未清(27.3 dev 手测⑤ 实证)。
-//
-// 27.4 改造:把单个长 marker 改成"语义核心片段组 + 允许中间插字"的正则,保持 AND 双条件(主题 7.2)
-//   - PATTERN_A(语义"没查到内容"):(没有找到|未找到|查不到|找不到) 与 (相关信息|相关内容|相关资料)
-//     之间允许插 0-30 字(实测插 9 字,30 字给冗余;{0,30} 上限挡远距误命中,31 字超界立即 false)
-//   - PATTERN_B(语义"建议转人工"):(联系人工|人工客服|转人工) 任一
-//   - 判定 = A.test && B.test(主题 7.2 AND 防误判初衷;主题 16.4 判文本不判 collector)
-//
-// 命中 → finalCitations 置空,DB 和前端 data part 同步不渲染引用 chip;
-// 天然覆盖"Agent 调了检索、collector 非空、但模型输出拒答文本"的 case。
-//
-// 已知遗留(主题 18.2 不藏风险):双条件 AND 固有妥协 — 正常长回答里 A B 各自独立出现会被
-// 误判 true(如"找不到该型号产品的相关信息,可以致电技术支持热线,也可以联系人工客服。"),
-// 留给技术债 (o) 完整解(分数判/语义判),本 Step 不引入分数判 / collector 长度判 / LLM 自评。
-const REFUSAL_PATTERN_A = /(没有找到|未找到|查不到|找不到)[\s\S]{0,30}(相关信息|相关内容|相关资料)/;
-const REFUSAL_PATTERN_B = /(联系人工|人工客服|转人工)/;
-function isRefusalText(text: string): boolean {
-  return REFUSAL_PATTERN_A.test(text) && REFUSAL_PATTERN_B.test(text);
-}
-
-// ---------- V2 Agent system prompt ----------
-// 拒答原句严格沿用 V1 措辞,同时命中 REFUSAL_PATTERN_A 与 PATTERN_B,
-// 保证 Step 23.3c/27.4 接拒答清洗时 isRefusalText 双条件 AND 匹配能命中。
-// Step 27.4 后 PATTERN_A 容忍中间插 0-30 字,即便 LLM 自然化输出"没有找到 XX 的相关信息"也能命中。
-const SYSTEM_PROMPT = `你是企业专属客服助手。
-
-可用工具:
-- search_knowledge_base(query):检索知识库片段,用于回答"具体业务内容"问题(如使用方法、参数细节、故障处理、政策条款等)。
-- list_documents():列出知识库现有文档的标题、状态、块数,用于回答"知识库元信息"问题(如"有哪些文档/你都知道什么内容/有什么资料/文档清单")。
-- escalate_to_human(reason):用户明确要求转人工 / 投诉抱怨 / 多轮无法解决时调用,记录转人工请求并返回标准化文案。
-- record_user_feedback(rating, comment?):用户主动对前一轮回答表达满意 / 不满意时调用,把评价写入数据库。rating 取值 'positive' 或 'negative',comment 可选,填用户原话要点。
-
-工具选择规则:
-- 元信息问题用 list_documents,具体内容问题用 search_knowledge_base。
-- 不要为元问题去 search,也不要为内容问题去 list。
-- 若两类信息都需要(如"先告诉我有什么文档,再讲第二份文档讲了什么"),可以先调 list_documents 再调 search_knowledge_base。
-- 用户**明确**说"转人工 / 找真人客服 / 投诉 / 我要找你们经理"等 → 立即调 escalate_to_human。
-- 同一问题连续 ≥2 轮 search 仍未解决、用户明显不满意或抱怨 → 调 escalate_to_human。
-- ⚠️ 单次知识库找不到答案按工作方式第 4 条的话术回答,**不要**直接 escalate —— 知识库找不到 ≠ 转人工,只有"用户主动要转人工"或"多轮+不满"才 escalate。
-- 用户**主动**说"有用 / 谢谢 / 解决了 / 太好了"等正面评价 → 调 record_user_feedback,rating='positive',comment 填用户原话要点。
-- 用户**主动**说"没用 / 答错了 / 不对 / 答非所问"等负面评价 → 调 record_user_feedback,rating='negative',comment 填用户原话要点。
-- ⚠️ 不要主动索要反馈、不要每轮都调 record_user_feedback;只在用户**自发**对前一轮 Agent 回答下评价时才调一次。
-
-工作方式:
-1. 判断问题类型后调用对应工具(规则见上);需要查知识库的问题禁止凭空回答。
-2. 严格依据工具返回的内容作答,禁止编造工具结果以外的信息。
-3. 仅当使用 search_knowledge_base 的检索片段作答时,回答末尾以 [来源 N] 标注引用编号(N 对应检索结果中的 [来源 N]);list_documents 返回的是元信息列表,无需 [来源 N]。
-4. 如果 search_knowledge_base 检索结果与问题无关或为空,回答"抱歉,我在知识库中没有找到相关信息,建议您联系人工客服。"——禁止用其他措辞。
-5. 调用 escalate_to_human 后,直接使用工具返回的文案回答用户,不要叠加 [来源 N]、不要改写措辞。
-6. 调用 record_user_feedback 后,直接使用工具返回的文案回答用户,不要叠加 [来源 N]、不要改写措辞。
-7. 用中文、简洁、分点作答。`;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
